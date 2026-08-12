@@ -15,6 +15,7 @@ keygen-player = { path = "../player" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+png = "0.17"
 
 [lib]
 path = "src/lib.rs"
