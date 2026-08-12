@@ -167,6 +167,7 @@ fn run(args: Args) -> Result<(), String> {
 }
 
 fn run_window(scene: Scene, smoke_seconds: Option<f32>) -> Result<(), String> {
+    native::require_supported_host()?;
     let width = scene.spec.design_width as usize;
     let height = scene.spec.design_height as usize;
     let mut window = Window::new(

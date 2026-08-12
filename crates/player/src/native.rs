@@ -10,6 +10,62 @@ use keygen_engine::input::{Device, InputEvent, InputEventKind, Key, PointerButto
 pub const SUPPORTED_OS: &str = "macOS";
 pub const SUPPORTED_ARCH: &str = "arm64";
 
+/// The host boundary is intentionally explicit: this product is qualified only
+/// for Apple Silicon macOS.  Rendering and story code remain portable, but the
+/// native window entrypoint must never silently run on an unqualified host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostQualification {
+    pub os: &'static str,
+    pub arch: &'static str,
+    pub supported: bool,
+}
+
+pub const fn compile_target() -> HostQualification {
+    HostQualification {
+        os: if cfg!(target_os = "macos") {
+            SUPPORTED_OS
+        } else {
+            "unsupported"
+        },
+        arch: if cfg!(target_arch = "aarch64") {
+            SUPPORTED_ARCH
+        } else {
+            "unsupported"
+        },
+        supported: cfg!(all(target_os = "macos", target_arch = "aarch64")),
+    }
+}
+
+pub fn runtime_target() -> HostQualification {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    HostQualification {
+        os: if os == "macos" {
+            SUPPORTED_OS
+        } else {
+            "unsupported"
+        },
+        arch: if arch == "aarch64" {
+            SUPPORTED_ARCH
+        } else {
+            "unsupported"
+        },
+        supported: os == "macos" && arch == "aarch64",
+    }
+}
+
+pub fn require_supported_host() -> Result<(), String> {
+    let target = runtime_target();
+    if target.supported {
+        Ok(())
+    } else {
+        Err(format!(
+            "kg_ddlc_plus native host requires macOS arm64 (detected {} {}); use --render or --validate for headless checks",
+            target.os, target.arch
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleEvent {
     Activated,
@@ -142,5 +198,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn compile_target_reports_the_build_contract() {
+        let target = compile_target();
+        assert_eq!(
+            target.supported,
+            cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        );
+        assert_eq!(
+            target.os,
+            if cfg!(target_os = "macos") {
+                SUPPORTED_OS
+            } else {
+                "unsupported"
+            }
+        );
+        assert_eq!(
+            target.arch,
+            if cfg!(target_arch = "aarch64") {
+                SUPPORTED_ARCH
+            } else {
+                "unsupported"
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_target_is_deterministic_for_the_current_process() {
+        let target = runtime_target();
+        assert_eq!(
+            target.supported,
+            target.os == SUPPORTED_OS && target.arch == SUPPORTED_ARCH
+        );
     }
 }

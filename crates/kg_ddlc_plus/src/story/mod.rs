@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt::Write, sync::Arc};
 
+pub mod runtime;
+
 pub const CAPABILITY_SCHEMA: &str = "keygen.story.capabilities.v1";
 pub const CODE_CAPABILITY_MISSING: &str = "KGD-412";
 pub const CODE_CAPABILITY_FAILED: &str = "KGD-413";

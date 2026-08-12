@@ -7,6 +7,7 @@
 use super::{locales::LocaleMetadata, story::StoryMetadata};
 use crate::assets::AssetCatalog;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,6 +26,117 @@ pub struct ReachabilityReport {
     pub reachable: Vec<String>,
     pub unreachable: Vec<String>,
     pub dangling: Vec<ContentReference>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentManifest {
+    pub schema: String,
+    pub roots: Vec<String>,
+    pub nodes: Vec<String>,
+    pub assets: Vec<String>,
+    pub locales: Vec<String>,
+    pub stories: Vec<String>,
+    pub references: Vec<ContentReference>,
+    pub reachability: ReachabilityReport,
+    pub package_sha256: String,
+}
+
+impl ContentManifest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != "kg_ddlc_plus.content.v1" {
+            return Err("unsupported content manifest schema".into());
+        }
+        for values in [
+            &self.roots,
+            &self.nodes,
+            &self.assets,
+            &self.locales,
+            &self.stories,
+        ] {
+            if !is_sorted_unique(values) {
+                return Err("content manifest identifiers must be sorted and unique".into());
+            }
+        }
+        self.reachability.validate()?;
+        if self.reachability.reachable != self.nodes {
+            return Err("content manifest must contain only reachable nodes".into());
+        }
+        if !self.reachability.unreachable.is_empty() {
+            return Err("content manifest contains unreachable nodes".into());
+        }
+        if !self.reachability.dangling.is_empty() {
+            return Err("content manifest contains dangling references".into());
+        }
+        if !is_sha256(&self.package_sha256) {
+            return Err("invalid content manifest package hash".into());
+        }
+        Ok(())
+    }
+    pub fn write(&self, path: &std::path::Path) -> Result<(), String> {
+        self.validate()?;
+        let bytes = serde_json::to_vec_pretty(self).map_err(|e| format!("encode manifest: {e}"))?;
+        std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+    }
+}
+
+pub fn compile_content_manifest(
+    catalog: &AssetCatalog,
+    stories: &[StoryMetadata],
+    locales: &[LocaleMetadata],
+    roots: &[String],
+    references: &[ContentReference],
+) -> Result<ContentManifest, Vec<String>> {
+    let mut errors = Vec::new();
+    if let Err(error) = catalog.validate() {
+        errors.push(error);
+    }
+    if let Err(locale_errors) = validate_locales(locales) {
+        errors.extend(locale_errors);
+    }
+    let assets = imported_asset_ids(catalog);
+    let story_ids = story_reference_ids(stories);
+    let mut locale_ids: Vec<String> = locales.iter().map(|l| l.locale.clone()).collect();
+    locale_ids.sort();
+    locale_ids.dedup();
+    let mut nodes = assets.clone();
+    nodes.extend(story_ids);
+    nodes.extend(locale_ids.clone());
+    nodes.sort();
+    nodes.dedup();
+    let report = reachable_content(roots, &nodes, references);
+    if roots.iter().any(|root| !nodes.contains(root)) {
+        errors.push("root references unknown content".into());
+    }
+    if !report.dangling.is_empty() {
+        errors.push("content graph contains dangling references".into());
+    }
+    if !report.unreachable.is_empty() {
+        errors.push("content graph contains unreachable nodes".into());
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let mut stories_out: Vec<String> = stories.iter().map(|s| s.id.clone()).collect();
+    stories_out.sort();
+    stories_out.dedup();
+    let mut manifest = ContentManifest {
+        schema: "kg_ddlc_plus.content.v1".into(),
+        roots: report.roots.clone(),
+        nodes: report.reachable.clone(),
+        assets,
+        locales: locale_ids,
+        stories: stories_out,
+        references: references.to_vec(),
+        reachability: report,
+        package_sha256: String::new(),
+    };
+    let mut unsigned = manifest.clone();
+    unsigned.package_sha256.clear();
+    let bytes =
+        serde_json::to_vec(&unsigned).map_err(|e| vec![format!("encode manifest hash: {e}")])?;
+    manifest.package_sha256 = format!("{:x}", Sha256::digest(bytes));
+    Ok(manifest)
 }
 
 impl ReachabilityReport {
@@ -180,6 +292,9 @@ pub fn story_reference_ids(stories: &[StoryMetadata]) -> Vec<String> {
 
 fn is_sorted_unique(values: &[String]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
+}
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
