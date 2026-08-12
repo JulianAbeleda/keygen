@@ -1,0 +1,8 @@
+{
+  "schema": "keygen.scene.v1", "title": "KeyGen Sample Project", "design_width": 960, "design_height": 540,
+  "clear": [18, 24, 36, 255], "font_path": "../assets/sample.ttf",
+  "layers": [{ "id": "sample-background", "path": "../assets/sample.png", "x": 480.0, "y": 270.0, "scale": 1.0, "anchor": "center", "alpha": 1.0, "entrance": null, "motion": null }],
+  "particle_insertions": [], "menu_insertion": null, "menu": null,
+  "text_layers": [{ "id": "sample-title", "text": "KeyGen sample project", "x": 48.0, "y": 48.0, "font_size": 32.0, "color": [240, 244, 255, 255], "outline": [0, 0, 0, 255], "outline_width": 1, "visible_at": 0.0, "characters_per_second": null }],
+  "particles": null, "fade": null
+}

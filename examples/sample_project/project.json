@@ -1,0 +1,9 @@
+{
+  "schema": "keygen.project.v1",
+  "project": { "id": "sample.project", "display_name": "KeyGen Sample Project", "version": "0.1.0" },
+  "viewport": { "width": 960, "height": 540 },
+  "assets": [{ "id": "image.sample", "kind": "image", "logical_path": "assets/sample.png", "sha256": "0000000000000000000000000000000000000000000000000000000000000000" }],
+  "scenes": [{ "id": "scene.start", "asset_ids": ["image.sample"] }],
+  "story": { "entry": "start", "labels": ["start"] },
+  "persistence": { "namespace": "sample.project", "schema": "sample.project.state.v1" }
+}
