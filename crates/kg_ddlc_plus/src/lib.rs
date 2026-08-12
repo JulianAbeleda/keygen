@@ -245,6 +245,23 @@ where
     let command = values.next().ok_or_else(usage)?;
     let options: Vec<String> = values.collect();
     match command.as_str() {
+        "compile-project" => {
+            reject_unknown(&options, &["--metadata", "--output"])?;
+            let metadata = required_value(&options, "--metadata")?;
+            let output = required_value(&options, "--output")?;
+            let bytes = fs::read(&metadata)
+                .map_err(|error| format!("cannot read metadata {}: {error}", metadata))?;
+            let file: import::project::ProjectMetadataFile = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("invalid project metadata: {error}"))?;
+            let project =
+                import::project::compile_project_file(&file).map_err(|errors| errors.join("; "))?;
+            let encoded = serde_json::to_vec_pretty(&project)
+                .map_err(|error| format!("encode project manifest: {error}"))?;
+            fs::write(&output, encoded)
+                .map_err(|error| format!("cannot write project manifest {}: {error}", output))?;
+            println!("compiled keygen.project.v1: {output}");
+            Ok(())
+        }
         "inspect" => {
             reject_unknown(&options, &["--source"])?;
             let source = discover_source(take_path(&options, "--source")?)?;
