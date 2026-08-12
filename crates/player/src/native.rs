@@ -10,6 +10,84 @@ use keygen_engine::input::{Device, InputEvent, InputEventKind, Key, PointerButto
 pub const SUPPORTED_OS: &str = "macOS";
 pub const SUPPORTED_ARCH: &str = "arm64";
 
+/// Design-space geometry shared by headless captures and native windows.
+/// Hosts must preserve this viewport's aspect ratio; the renderer owns the
+/// conversion to drawable pixels and the input adapter uses [`map_pointer`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DesignViewport {
+    pub width: usize,
+    pub height: usize,
+}
+
+impl DesignViewport {
+    pub const fn new(width: usize, height: usize) -> Self {
+        Self { width, height }
+    }
+
+    pub const fn pixel_count(self) -> usize {
+        self.width * self.height
+    }
+}
+
+/// A fully-owned frame handed from the deterministic scene renderer to a
+/// presentation backend. Pixels are packed RGBA8 in row-major order. Keeping
+/// this contract independent of minifb makes an AppKit/Metal backend a
+/// replaceable host adapter instead of a second renderer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostFrame {
+    pub viewport: DesignViewport,
+    pub rgba8: Vec<u8>,
+    pub frame: u64,
+}
+
+impl HostFrame {
+    pub fn new(viewport: DesignViewport, frame: u64, rgba8: Vec<u8>) -> Result<Self, String> {
+        let expected = viewport.pixel_count() * 4;
+        if rgba8.len() != expected {
+            return Err(format!(
+                "RGBA frame has {} bytes; expected {expected}",
+                rgba8.len()
+            ));
+        }
+        Ok(Self {
+            viewport,
+            rgba8,
+            frame,
+        })
+    }
+}
+
+/// Backend-neutral lifecycle and presentation surface. A native host may
+/// implement this with AppKit/Metal; tests can implement it in memory.
+pub trait PresentationBackend {
+    fn present(&mut self, frame: HostFrame) -> Result<(), String>;
+    fn lifecycle(&mut self, event: LifecycleEvent) -> Result<(), String>;
+    fn lifecycle_state(&self) -> LifecycleState;
+}
+
+/// Audio is intentionally an effect sink, not a renderer concern. The story
+/// VM emits logical clip/channel commands and a platform adapter decides how
+/// to decode and schedule them (CoreAudio on macOS, a test sink in CI).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AudioCommand {
+    Play {
+        channel: String,
+        clip: String,
+        looped: bool,
+    },
+    Stop {
+        channel: String,
+    },
+    SetVolume {
+        channel: String,
+        millibel: i16,
+    },
+}
+
+pub trait AudioBackend {
+    fn submit(&mut self, command: AudioCommand) -> Result<(), String>;
+}
+
 /// The host boundary is intentionally explicit: this product is qualified only
 /// for Apple Silicon macOS.  Rendering and story code remain portable, but the
 /// native window entrypoint must never silently run on an unqualified host.
@@ -232,5 +310,54 @@ mod tests {
             target.supported,
             target.os == SUPPORTED_OS && target.arch == SUPPORTED_ARCH
         );
+    }
+
+    #[test]
+    fn host_frame_rejects_wrong_pixel_payload() {
+        let viewport = DesignViewport::new(2, 3);
+        assert!(HostFrame::new(viewport, 7, vec![0; 23]).is_err());
+        let frame = HostFrame::new(viewport, 7, vec![0; 24]).expect("valid RGBA frame");
+        assert_eq!(frame.frame, 7);
+        assert_eq!(frame.viewport.pixel_count(), 6);
+    }
+
+    #[test]
+    fn presentation_backend_can_be_tested_without_a_window() {
+        struct MemoryBackend {
+            state: LifecycleState,
+            frames: Vec<u64>,
+        }
+        impl PresentationBackend for MemoryBackend {
+            fn present(&mut self, frame: HostFrame) -> Result<(), String> {
+                if !self.state.accepts_frame() {
+                    return Err("backend is closed".into());
+                }
+                self.frames.push(frame.frame);
+                Ok(())
+            }
+            fn lifecycle(&mut self, event: LifecycleEvent) -> Result<(), String> {
+                self.state.apply(event);
+                Ok(())
+            }
+            fn lifecycle_state(&self) -> LifecycleState {
+                self.state
+            }
+        }
+
+        let viewport = DesignViewport::new(1, 1);
+        let mut backend = MemoryBackend {
+            state: LifecycleState::default(),
+            frames: Vec::new(),
+        };
+        backend
+            .present(HostFrame::new(viewport, 3, vec![255; 4]).unwrap())
+            .unwrap();
+        backend.lifecycle(LifecycleEvent::QuitRequested).unwrap();
+        backend.lifecycle(LifecycleEvent::Closed).unwrap();
+        assert_eq!(backend.lifecycle_state(), LifecycleState::Closed);
+        assert!(backend
+            .present(HostFrame::new(viewport, 4, vec![0; 4]).unwrap())
+            .is_err());
+        assert_eq!(backend.frames, vec![3]);
     }
 }

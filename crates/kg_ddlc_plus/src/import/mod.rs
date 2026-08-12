@@ -12,6 +12,7 @@ pub mod fonts;
 pub mod images;
 pub mod locales;
 pub mod materials;
+pub mod project;
 pub mod scene;
 pub mod sprites;
 pub mod story;

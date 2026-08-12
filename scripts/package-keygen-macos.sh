@@ -5,8 +5,14 @@ out=dist/macos; binary=; target=; display_name=; bundle_id=; version=0.1.0; min_
 usage() { echo "usage: $0 --binary PATH --target ID --display-name NAME --bundle-id ID [--resources DIR] [--out DIR]" >&2; exit 2; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --binary|--target|--display-name|--bundle-id|--resources|--out) [ "$#" -ge 2 ] || usage; key=${1#--}; eval "$key=\$2"; shift 2 ;;
-    --version|--min-os) [ "$#" -ge 2 ] || usage; key=${1#--}; eval "$key=\$2"; shift 2 ;;
+    --binary) [ "$#" -ge 2 ] || usage; binary=$2; shift 2 ;;
+    --target) [ "$#" -ge 2 ] || usage; target=$2; shift 2 ;;
+    --display-name) [ "$#" -ge 2 ] || usage; display_name=$2; shift 2 ;;
+    --bundle-id) [ "$#" -ge 2 ] || usage; bundle_id=$2; shift 2 ;;
+    --resources) [ "$#" -ge 2 ] || usage; resources=$2; shift 2 ;;
+    --out) [ "$#" -ge 2 ] || usage; out=$2; shift 2 ;;
+    --version) [ "$#" -ge 2 ] || usage; version=$2; shift 2 ;;
+    --min-os) [ "$#" -ge 2 ] || usage; min_os=$2; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
