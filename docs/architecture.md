@@ -42,6 +42,7 @@ that a host must authorize and execute.
 - design-space coordinates and bilinear scaling;
 - font rasterization with fill and outline;
 - easing, entrances, motion, particles, and fades;
+- independently timed text layers for non-interactive boot sequences;
 - menu focus geometry and deterministic RGBA output.
 
 `keygen-player` implements:
@@ -51,6 +52,11 @@ that a host must authorize and execute.
 - deterministic headless PNG rendering;
 - a resizable native window;
 - keyboard and pointer menu interaction.
+
+`kg-ddlc-plus` is intentionally outside the reusable engine boundary. It
+validates one known player-owned AssetRipper recovery, translates a supported
+subset into KeyGen-owned schemas, and writes only to ignored local output. It
+does not make DDLC Plus content part of KeyGen.
 
 This is the first engine slice, not yet a full Unity replacement. Audio,
 general scene graphs, behavior execution, asset compilation, packaging, 3D,

@@ -6,8 +6,9 @@ requiring a proprietary editor, account, activation service, or runtime.
 
 The current `0.1.0` vertical slice is deliberately small: it validates a
 versioned 2D scene, loads PNG and TrueType/OpenType assets, deterministically
-composes a frame, renders outlined menu text and transitions, accepts keyboard
-and pointer input, writes headless PNG output, and opens a native window.
+composes a frame, renders timed text, outlined menu text, and transitions,
+accepts keyboard and pointer input, writes headless PNG output, and opens a
+native window.
 
 ## Honest compatibility boundary
 
@@ -42,6 +43,9 @@ assets, fonts, trademarks, or code. KeyGen contains none of those materials.
   text, transitions, particles, and hit testing.
 - `keygen-player` owns command-line parsing, filesystem loading, the native
   window, input dispatch, and headless render output.
+- `kg-ddlc-plus` is an unpublishable, private compatibility compiler. It reads
+  a player-owned recovery, emits ignored local KeyGen package data, and contains
+  no third-party assets or recovered source in Git.
 - Games own their content, product state, terminal/AI integration, and any
   source-format import fixtures.
 
@@ -63,6 +67,13 @@ cargo run -p keygen-player -- \
 
 # Run the same composition path in a native window.
 cargo run -p keygen-player -- --scene path/to/scene.json
+
+# Compile the supported DDLC Plus recovery into ignored local package data.
+cargo run -p kg-ddlc-plus -- compile
+
+# Render or run that compiled package through KeyGen.
+cargo run -p kg-ddlc-plus -- render --output local/kg_ddlc_plus/bios.png
+cargo run -p kg-ddlc-plus -- run
 ```
 
 The minimum supported Rust toolchain is 1.85, the first stable release with
@@ -83,7 +94,9 @@ current schema identifier is `keygen.scene.v1`.
 7. Keep any visual editor optional; command-line builds remain first-class.
 
 See [architecture.md](docs/architecture.md) and
-[compatibility.md](docs/compatibility.md) for the governing boundaries.
+[compatibility.md](docs/compatibility.md) for the governing boundaries. The
+private target, supported source fingerprint, commands, and phased coverage are
+documented in [kg_ddlc_plus.md](docs/kg_ddlc_plus.md).
 
 ## License
 

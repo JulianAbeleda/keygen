@@ -3,3 +3,5 @@ target/
 *.swp
 *.tmp
 local-references/
+/local/
+/artifacts/

@@ -1,6 +1,9 @@
 use keygen_engine::{
     ease,
-    model::{Anchor, Color, Easing, ImageLayerSpec, MenuEntrySpec, MenuSpec, SceneSpec, SCHEMA},
+    model::{
+        Anchor, Color, Easing, ImageLayerSpec, MenuEntrySpec, MenuSpec, SceneSpec, TextLayerSpec,
+        SCHEMA,
+    },
     Surface,
 };
 
@@ -63,7 +66,7 @@ fn minimal_scene() -> SceneSpec {
         }],
         particle_insertions: vec![],
         menu_insertion: None,
-        menu: MenuSpec {
+        menu: Some(MenuSpec {
             x: 0.0,
             y: 0.0,
             width: 1.0,
@@ -79,10 +82,36 @@ fn minimal_scene() -> SceneSpec {
                 label: "Entry".into(),
                 enabled: true,
             }],
-        },
+        }),
+        text_layers: vec![],
         particles: None,
         fade: None,
     }
+}
+
+#[test]
+fn scenes_without_menus_are_valid() {
+    let mut scene = minimal_scene();
+    scene.menu = None;
+    assert!(scene.validate().is_ok());
+}
+
+#[test]
+fn invalid_text_timing_fails_closed() {
+    let mut scene = minimal_scene();
+    scene.text_layers.push(TextLayerSpec {
+        id: "boot".into(),
+        text: "MEMORY OK".into(),
+        x: 0.0,
+        y: 0.0,
+        font_size: 16.0,
+        color: Color([255; 4]),
+        outline: Color([0, 0, 0, 255]),
+        outline_width: 0,
+        visible_at: -1.0,
+        characters_per_second: None,
+    });
+    assert!(scene.validate().is_err());
 }
 
 #[test]

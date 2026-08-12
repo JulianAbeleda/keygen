@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+message_file=$1
+subject=$(sed -n '1p' "$message_file")
+allowed='engine|player|import|package|platform|test|docs|repo'
+
+if ! printf '%s\n' "$subject" | grep -Eq "^(NFC - )?(\[($allowed)\])+( .+)$"; then
+  echo "Commit subject must start with one or more KeyGen areas:" >&2
+  echo "  [import][test] compile the supported source package" >&2
+  echo "Allowed: $allowed" >&2
+  echo "Optional non-functional prefix: NFC - " >&2
+  exit 1
+fi

@@ -90,12 +90,13 @@ impl Scene {
             self.draw_menu_insertion(&mut surface, focused, layer_index + 1);
             self.draw_particle_insertions(&mut surface, time, layer_index + 1);
         }
+        self.draw_text_layers(&mut surface, time);
         self.draw_fade(&mut surface, time);
         surface
     }
 
     pub fn menu_hit(&self, x: f32, y: f32) -> Option<usize> {
-        let menu = &self.spec.menu;
+        let menu = self.spec.menu.as_ref()?;
         if x < menu.x || x > menu.x + menu.width {
             return None;
         }
@@ -105,8 +106,35 @@ impl Scene {
         })
     }
 
+    fn draw_text_layers(&self, surface: &mut Surface, time: f32) {
+        for text in &self.spec.text_layers {
+            if time < text.visible_at {
+                continue;
+            }
+            let visible = match text.characters_per_second {
+                Some(rate) => {
+                    let count = ((time - text.visible_at) * rate).floor().max(0.0) as usize;
+                    text.text.chars().take(count).collect::<String>()
+                }
+                None => text.text.clone(),
+            };
+            self.draw_text(
+                surface,
+                &visible,
+                text.x,
+                text.y,
+                text.font_size,
+                text.color,
+                text.outline,
+                text.outline_width,
+            );
+        }
+    }
+
     fn draw_menu(&self, surface: &mut Surface, focused: usize) {
-        let menu = &self.spec.menu;
+        let Some(menu) = &self.spec.menu else {
+            return;
+        };
         for (index, entry) in menu.entries.iter().enumerate() {
             let y = menu.y + index as f32 * (menu.row_height + menu.spacing);
             let outline = if index == focused {
@@ -215,7 +243,9 @@ impl Scene {
     }
 
     fn draw_menu_insertion(&self, surface: &mut Surface, focused: usize, insertion: usize) {
-        if self.spec.menu_insertion.unwrap_or(self.spec.layers.len()) == insertion {
+        if self.spec.menu.is_some()
+            && self.spec.menu_insertion.unwrap_or(self.spec.layers.len()) == insertion
+        {
             self.draw_menu(surface, focused);
         }
     }

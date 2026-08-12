@@ -15,7 +15,10 @@ pub struct SceneSpec {
     #[serde(default)]
     pub particle_insertions: Vec<usize>,
     pub menu_insertion: Option<usize>,
-    pub menu: MenuSpec,
+    #[serde(default)]
+    pub menu: Option<MenuSpec>,
+    #[serde(default)]
+    pub text_layers: Vec<TextLayerSpec>,
     pub particles: Option<ParticleSpec>,
     pub fade: Option<FadeSpec>,
 }
@@ -104,6 +107,22 @@ pub struct MenuEntrySpec {
     pub label: String,
     #[serde(default = "enabled")]
     pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextLayerSpec {
+    pub id: String,
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub font_size: f32,
+    pub color: Color,
+    pub outline: Color,
+    pub outline_width: u8,
+    #[serde(default)]
+    pub visible_at: f32,
+    pub characters_per_second: Option<f32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -217,25 +236,38 @@ impl SceneSpec {
         {
             return Err("menu insertion is outside the layer list".into());
         }
-        if self.menu.entries.is_empty()
-            || self
-                .menu
-                .entries
-                .iter()
-                .any(|entry| entry.id.trim().is_empty() || entry.label.trim().is_empty())
-            || self.menu.font_size <= 0.0
-            || self.menu.row_height <= 0.0
-            || self.menu.width <= 0.0
-            || !finite(&[
-                self.menu.x,
-                self.menu.y,
-                self.menu.width,
-                self.menu.row_height,
-                self.menu.spacing,
-                self.menu.font_size,
-            ])
-        {
-            return Err("menu geometry or entries are invalid".into());
+        if let Some(menu) = &self.menu {
+            if menu.entries.is_empty()
+                || menu
+                    .entries
+                    .iter()
+                    .any(|entry| entry.id.trim().is_empty() || entry.label.trim().is_empty())
+                || menu.font_size <= 0.0
+                || menu.row_height <= 0.0
+                || menu.width <= 0.0
+                || !finite(&[
+                    menu.x,
+                    menu.y,
+                    menu.width,
+                    menu.row_height,
+                    menu.spacing,
+                    menu.font_size,
+                ])
+            {
+                return Err("menu geometry or entries are invalid".into());
+            }
+        }
+        for text in &self.text_layers {
+            if text.id.trim().is_empty()
+                || text.font_size <= 0.0
+                || text.visible_at < 0.0
+                || text
+                    .characters_per_second
+                    .is_some_and(|value| value <= 0.0 || !value.is_finite())
+                || !finite(&[text.x, text.y, text.font_size, text.visible_at])
+            {
+                return Err(format!("text layer {} is invalid", text.id));
+            }
         }
         if let Some(particles) = &self.particles {
             if particles.path.trim().is_empty()

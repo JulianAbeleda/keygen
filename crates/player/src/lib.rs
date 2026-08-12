@@ -147,7 +147,11 @@ fn run(args: Args) -> Result<(), String> {
             scene.spec.design_width,
             scene.spec.design_height,
             scene.spec.layers.len(),
-            scene.spec.menu.entries.len()
+            scene
+                .spec
+                .menu
+                .as_ref()
+                .map_or(0, |menu| menu.entries.len())
         );
         return Ok(());
     }
@@ -217,10 +221,16 @@ fn run_window(scene: Scene, smoke_seconds: Option<f32>) -> Result<(), String> {
             || pointer_activated;
         mouse_was_down = mouse_down;
         if activated {
-            let entry = &scene.spec.menu.entries[focused];
-            println!("menu action: {}", entry.id);
-            if entry.id == "exit" {
-                break;
+            if let Some(entry) = scene
+                .spec
+                .menu
+                .as_ref()
+                .and_then(|menu| menu.entries.get(focused))
+            {
+                println!("menu action: {}", entry.id);
+                if entry.id == "exit" {
+                    break;
+                }
             }
         }
         let frame = scene.render(elapsed, focused).packed_rgb();
@@ -235,19 +245,28 @@ fn first_enabled(scene: &Scene, start: usize) -> usize {
     scene
         .spec
         .menu
-        .entries
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find_map(|(index, entry)| entry.enabled.then_some(index))
+        .as_ref()
+        .and_then(|menu| {
+            menu.entries
+                .iter()
+                .enumerate()
+                .skip(start)
+                .find_map(|(index, entry)| entry.enabled.then_some(index))
+        })
         .unwrap_or(0)
 }
 
 fn next_enabled(scene: &Scene, current: usize, direction: isize) -> usize {
-    let count = scene.spec.menu.entries.len() as isize;
+    let Some(menu) = &scene.spec.menu else {
+        return current;
+    };
+    let count = menu.entries.len() as isize;
+    if count == 0 {
+        return current;
+    }
     for distance in 1..=count {
         let index = (current as isize + direction * distance).rem_euclid(count) as usize;
-        if scene.spec.menu.entries[index].enabled {
+        if menu.entries[index].enabled {
             return index;
         }
     }

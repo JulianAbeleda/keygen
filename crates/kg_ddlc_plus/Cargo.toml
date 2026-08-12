@@ -1,0 +1,23 @@
+[package]
+name = "kg-ddlc-plus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Private DDLC Plus compatibility target for the KeyGen engine"
+publish = false
+
+[dependencies]
+keygen-engine = { path = "../engine" }
+keygen-player = { path = "../player" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "kg-ddlc-plus"
+path = "src/main.rs"
