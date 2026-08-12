@@ -52,7 +52,9 @@ def extract(source: Path, output: Path, max_files: int = 100_000, max_bytes: int
             logical = "source." + relative.replace("/", ".").replace(" ", "_")
             record = {"logical_id": logical, "kind": kind, "source_sha256": digest,
                       "output_sha256": digest, "import_mode": "translate",
-                      "importer_version": SCHEMA, "blob": "metadata-only/" + digest}
+                      "importer_version": SCHEMA, "blob": "metadata-only/" + digest,
+                      # Relative provenance is safe to publish; absolute source paths are not.
+                      "source_path": relative}
             if kind == "image" and path.suffix.lower() == ".png":
                 size_info = png_size(path)
                 if size_info:
