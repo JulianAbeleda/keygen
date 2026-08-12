@@ -339,6 +339,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "keygen-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "keygen-engine"
 version = "0.1.0"
 dependencies = [
@@ -360,6 +368,7 @@ dependencies = [
 name = "kg-ddlc-plus"
 version = "0.1.0"
 dependencies = [
+ "keygen-diagnostics",
  "keygen-engine",
  "keygen-player",
  "serde",

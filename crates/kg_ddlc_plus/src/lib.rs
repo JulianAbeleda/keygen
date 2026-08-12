@@ -2,6 +2,7 @@
 //! Private compatibility compiler for a player-owned DDLC Plus recovery.
 
 use keygen_engine::model::SceneSpec;
+pub mod evidence;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{

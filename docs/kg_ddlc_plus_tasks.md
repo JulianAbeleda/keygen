@@ -226,10 +226,10 @@ every launcher app has semantic, state, and private capture evidence.
 | KGD-414 | Capability batch generator under tasks/generated/ | 413 | emits stable batches of at most eight cohesive handlers with dependencies and tests |
 | KGD-415 | Core variable, flow, interpolation, and transform capability batches | 414 | generated batch manifests green; deterministic effect traces |
 | KGD-416 | Dialogue, screen, poem, menu, and special-effect capability batches | 320–329,414 | generated batch manifests green; screen result and save policies tested |
-| KGD-417 | File, persistence, unlock, and launcher-bridge capability batches | 240,414,430–441 | sandbox and state effects typed; no arbitrary filesystem calls |
+| KGD-417 | File, persistence, unlock, and launcher-bridge capability batches | 240,414,430–435,440–441 | sandbox and state effects typed; no arbitrary filesystem calls |
 | KGD-418 | Character and story-special-case capability batches | 312,414 | every reachable handler implemented or scope-blocking evidence filed |
 | KGD-419 | Imported story validation and reachability pass | 412–418 | 2,160 blocks, 287 labels, 27,968 descriptors reconcile; zero unknown reachable call |
-| KGD-420 | Deterministic story replay harness | 319,321–329,419 | scripted inputs produce stable state, frame, audio-event, and store-effect hashes |
+| KGD-420 | Deterministic story replay harness | 320–329,419 | scripted inputs produce stable state, frame, audio-event, and store-effect hashes |
 
 KGD-414's generated packets become ledger children KGD-415.x through KGD-418.x.
 They may run in parallel only when their generated writable paths do not
@@ -258,7 +258,7 @@ has a machine-checked implementation or an explicit scope-blocking diagnostic.
 | KGD-441 | Local unlock/progression and null external achievement provider | 408,430 | deterministic events, app/story projection, reset; no Steam dependency |
 | KGD-442 | Localization runtime and live reload | 150,307,435 | locale switch atomically selects text/sprite/font groups; complete content coverage is enforced by KGD-444 |
 | KGD-443 | Save-loading scene and failure/recovery UX | 222,325,431–435 | busy, corrupt, incompatible, restored, and failed states; user retains last valid save |
-| KGD-444 | Full reachable-content compile | 419,421–443 | zero unclassified reachable object, asset, descriptor, expression, or capability |
+| KGD-444 | Full reachable-content compile | 419,421–425,430–435,440–443 | zero unclassified reachable object, asset, descriptor, expression, or capability |
 | KGD-445 | Story completion and progression suite | 420,444 | deterministic route suite covers endings, side stories, unlocks, reset and return-to-launcher |
 
 Wave 6 exits only when G5 and G6 pass. Content volume does not allow a

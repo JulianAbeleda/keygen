@@ -9,6 +9,7 @@ description = "Private DDLC Plus compatibility target for the KeyGen engine"
 publish = false
 
 [dependencies]
+keygen-diagnostics = { path = "../diagnostics" }
 keygen-engine = { path = "../engine" }
 keygen-player = { path = "../player" }
 serde.workspace = true
