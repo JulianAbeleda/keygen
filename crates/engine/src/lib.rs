@@ -9,6 +9,8 @@ mod compositor;
 mod image;
 pub mod input;
 pub mod model;
+pub mod project;
+pub mod runtime;
 pub mod story;
 mod surface;
 

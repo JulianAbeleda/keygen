@@ -60,7 +60,7 @@ pub fn require_supported_host() -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "kg_ddlc_plus native host requires macOS arm64 (detected {} {}); use --render or --validate for headless checks",
+            "KeyGen native host requires macOS arm64 (detected {} {}); use --render or --validate for headless checks",
             target.os, target.arch
         ))
     }
