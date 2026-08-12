@@ -339,6 +339,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "keygen"
+version = "0.1.0"
+dependencies = [
+ "keygen-engine",
+ "keygen-player",
+]
+
+[[package]]
 name = "keygen-diagnostics"
 version = "0.1.0"
 dependencies = [

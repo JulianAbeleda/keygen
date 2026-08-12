@@ -2,6 +2,7 @@
 //! Private compatibility compiler for a player-owned DDLC Plus recovery.
 
 use keygen_engine::model::SceneSpec;
+pub mod adapter;
 pub mod assets;
 pub mod evidence;
 pub mod identity;

@@ -1,0 +1,16 @@
+[package]
+name = "keygen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Generic editor-free KeyGen project CLI"
+
+[dependencies]
+keygen-engine = { path = "../engine" }
+keygen-player = { path = "../player" }
+
+[[bin]]
+name = "keygen"
+path = "src/main.rs"
