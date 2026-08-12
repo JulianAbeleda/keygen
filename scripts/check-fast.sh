@@ -6,5 +6,6 @@ cd "$repo_root"
 
 git diff --cached --check
 python3 sz.py
+python3 scripts/check-canonical-apps.py
 cargo fmt --all -- --check
 cargo check --workspace

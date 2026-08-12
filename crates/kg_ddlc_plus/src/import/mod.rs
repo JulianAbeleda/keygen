@@ -6,6 +6,7 @@
 
 pub mod animation;
 pub mod audio;
+pub mod content;
 pub mod dependencies;
 pub mod fonts;
 pub mod images;

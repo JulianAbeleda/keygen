@@ -11,6 +11,7 @@ use std::{
     time::Instant,
 };
 
+pub mod native;
 pub mod storage;
 
 #[derive(Debug)]
@@ -200,7 +201,8 @@ fn run_window(scene: Scene, smoke_seconds: Option<f32>) -> Result<(), String> {
         }
         let window_size = window.get_size();
         let hovered = if let Some((mouse_x, mouse_y)) = window.get_mouse_pos(MouseMode::Discard) {
-            let (design_x, design_y) = map_pointer(mouse_x, mouse_y, window_size, (width, height));
+            let (design_x, design_y) =
+                native::map_pointer((mouse_x, mouse_y), window_size, (width, height));
             let hit = scene.menu_hit(design_x, design_y);
             if let Some(index) = hit {
                 focused = index;
@@ -273,11 +275,4 @@ fn next_enabled(scene: &Scene, current: usize, direction: isize) -> usize {
         }
     }
     current
-}
-
-fn map_pointer(x: f32, y: f32, window: (usize, usize), design: (usize, usize)) -> (f32, f32) {
-    let scale = (window.0 as f32 / design.0 as f32).min(window.1 as f32 / design.1 as f32);
-    let offset_x = (window.0 as f32 - design.0 as f32 * scale) * 0.5;
-    let offset_y = (window.1 as f32 - design.1 as f32 * scale) * 0.5;
-    ((x - offset_x) / scale, (y - offset_y) / scale)
 }
