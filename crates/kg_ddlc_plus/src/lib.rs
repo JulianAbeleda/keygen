@@ -6,7 +6,9 @@ pub mod assets;
 pub mod evidence;
 pub mod identity;
 pub mod import;
+pub mod launcher;
 pub mod source;
+pub mod vn;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
