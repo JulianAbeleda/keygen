@@ -1,0 +1,19 @@
+[package]
+name = "keygen-player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless CLI and native player for the KeyGen game engine"
+
+[dependencies]
+keygen-engine = { path = "../engine" }
+minifb.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "keygen"
+path = "src/main.rs"
