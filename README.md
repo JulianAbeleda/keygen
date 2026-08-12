@@ -96,7 +96,10 @@ current schema identifier is `keygen.scene.v1`.
 See [architecture.md](docs/architecture.md) and
 [compatibility.md](docs/compatibility.md) for the governing boundaries. The
 private target, supported source fingerprint, commands, and phased coverage are
-documented in [kg_ddlc_plus.md](docs/kg_ddlc_plus.md).
+documented in [kg_ddlc_plus.md](docs/kg_ddlc_plus.md). Its exhaustive,
+asset-reuse-first macOS contract and delegation ledger are
+[kg_ddlc_plus_scope.md](docs/kg_ddlc_plus_scope.md) and
+[kg_ddlc_plus_tasks.md](docs/kg_ddlc_plus_tasks.md).
 
 ## License
 

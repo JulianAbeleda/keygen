@@ -5,6 +5,11 @@ work. The separate name prevents its output from being confused with the
 original game or an official build. The compiler is open source; the input and
 compiled content remain local and player-owned.
 
+The canonical implementation contract is the
+[macOS compatibility scope](kg_ddlc_plus_scope.md), and the delegation-sized
+work breakdown is the [execution ledger](kg_ddlc_plus_tasks.md). This file is
+only the operator overview.
+
 ## Supported source
 
 The current importer accepts one exact recovery:
@@ -74,10 +79,20 @@ launcher, DDLC title menu, story interpreter, save system, or audio graph.
 | 3 | DDLC title screen and settings | visual captures and action parity |
 | 4 | Visual-novel command IR | documented command subset and rejection tests |
 | 5 | Dialogue, sprites, audio, saves, transitions | deterministic replay and persistence tests |
-| 6 | Supported-story coverage and native packaging | clean-machine macOS/Linux/Windows qualification |
+| 6 | Supported-story coverage and native packaging | clean-machine Apple Silicon macOS qualification |
 
 Each phase extends general KeyGen primitives only when the primitive is useful
 beyond this target. Product-specific mappings stay in `kg-ddlc-plus`.
+
+## Reuse-first rule
+
+The compatibility compiler must use recovered, player-owned images, sprites,
+fonts, audio, animations, localization variants, and serialized layout values
+when they exist. It may translate Unity-specific metadata into KeyGen schemas,
+but it may not replace available art with generated, redrawn, stock, or
+approximate content. Engine behavior such as Unity shaders and C# execution is
+implemented independently in Rust and verified against private reference
+captures.
 
 ## Content boundary
 
