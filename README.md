@@ -65,6 +65,10 @@ cargo run -p keygen-player -- \
 cargo run -p keygen-player -- --scene path/to/scene.json
 ```
 
+The minimum supported Rust toolchain is 1.85, the first stable release with
+edition-2024 Cargo manifest support required by current cross-platform window
+dependencies.
+
 Scene asset paths may be absolute or relative to the scene document. The
 current schema identifier is `keygen.scene.v1`.
 
