@@ -5,3 +5,4 @@ target/
 local-references/
 /local/
 /artifacts/
+scripts/private/__pycache__/
