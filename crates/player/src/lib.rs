@@ -11,6 +11,8 @@ use std::{
     time::Instant,
 };
 
+pub mod storage;
+
 #[derive(Debug)]
 struct Args {
     scene: PathBuf,

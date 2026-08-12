@@ -362,6 +362,9 @@ version = "0.1.0"
 dependencies = [
  "keygen-engine",
  "minifb",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
