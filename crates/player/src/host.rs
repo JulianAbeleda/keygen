@@ -3,6 +3,7 @@ use keygen_engine::{Canvas, Surface};
 use minifb::{InputCallback, Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::{
     cell::RefCell,
+    collections::VecDeque,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -143,6 +144,11 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let mut frame = 0;
     let mut previous_pointer = None;
     let mut previous_left_down = false;
+    // minifb's macOS Metal backend consumes the submitted pixel pointer on an
+    // asynchronous display callback. Keep several complete submissions alive
+    // so neither a transition frame nor the final static frame can point at a
+    // temporary Vec that Rust has already released.
+    let mut presented_frames: VecDeque<Vec<u32>> = VecDeque::with_capacity(5);
     while window.is_open() && !app.should_close() {
         let now = Instant::now();
         let delta = now.duration_since(previous);
@@ -211,13 +217,19 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
             app.frame(&mut canvas, context);
             let physical_width = canvas.surface().width as usize;
             let physical_height = canvas.surface().height as usize;
+            presented_frames.push_back(canvas.surface().packed_rgb());
             window
                 .update_with_buffer(
-                    &canvas.surface().packed_rgb(),
+                    presented_frames.back().expect("presented frame was queued"),
                     physical_width,
                     physical_height,
                 )
                 .map_err(|e| e.to_string())?;
+            // Three Metal buffers may be in flight. Keep those plus the latest
+            // submitted frame alive until a later presentation advances them.
+            while presented_frames.len() > 4 {
+                presented_frames.pop_front();
+            }
         } else {
             window.update();
         }
