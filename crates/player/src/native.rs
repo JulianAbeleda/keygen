@@ -6,6 +6,9 @@
 //! changing the engine or story state.
 
 use keygen_engine::input::{Device, InputEvent, InputEventKind, Key, PointerButton};
+use std::process::Child;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 pub const SUPPORTED_OS: &str = "macOS";
 pub const SUPPORTED_ARCH: &str = "arm64";
@@ -78,6 +81,16 @@ pub enum MacOsBackendKind {
     AppKitMetal,
 }
 
+impl MacOsBackendKind {
+    /// Select the backend currently compiled into the player.  The minifb
+    /// backend is itself a native Cocoa window on macOS; keeping selection
+    /// explicit prevents silently claiming a Metal renderer that is not
+    /// linked into this binary yet.
+    pub const fn compiled() -> Self {
+        Self::Minifb
+    }
+}
+
 /// Safe macOS launch adapter. It describes a bundle launch without invoking
 /// shell commands or linking Cocoa. The eventual AppKit host can consume the
 /// same argv/environment contract, while tests can validate it on any host.
@@ -127,6 +140,26 @@ impl MacOsLaunchAdapter {
         entries
             .find_map(|entry| entry.ok().map(|e| e.path()))
             .ok_or_else(|| "macOS bundle has no executable in Contents/MacOS".into())
+    }
+
+    /// Launch the bundle through LaunchServices.  This is the real macOS
+    /// process handoff used by external launchers; rendering remains owned by
+    /// the executable inside the bundle.  It is intentionally unavailable on
+    /// non-macOS hosts so CI cannot accidentally launch an arbitrary file.
+    #[cfg(target_os = "macos")]
+    pub fn launch(&self) -> Result<Child, String> {
+        self.validate()?;
+        Command::new("open")
+            .args(["-n", "-W"])
+            .arg(&self.bundle)
+            .spawn()
+            .map_err(|error| format!("cannot launch macOS app {}: {error}", self.bundle.display()))
+    }
+
+    /// Launching an app bundle is a macOS-only operation.
+    #[cfg(not(target_os = "macos"))]
+    pub fn launch(&self) -> Result<Child, String> {
+        Err("macOS app launch requires a macOS host".into())
     }
 }
 
@@ -582,5 +615,17 @@ mod tests {
     fn launch_adapter_rejects_non_app_bundle() {
         let adapter = MacOsLaunchAdapter::new("/tmp/keygen");
         assert!(adapter.validate().is_err());
+    }
+
+    #[test]
+    fn compiled_backend_is_explicitly_the_native_window_fallback() {
+        assert_eq!(MacOsBackendKind::compiled(), MacOsBackendKind::Minifb);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn launch_adapter_does_not_launch_on_non_macos() {
+        let adapter = MacOsLaunchAdapter::new("/tmp/keygen.app");
+        assert!(adapter.launch().is_err());
     }
 }

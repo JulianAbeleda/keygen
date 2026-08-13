@@ -1,10 +1,13 @@
 //! Generic project CLI.  Game-specific packages are data supplied through a
 //! `keygen.project.v1` manifest; this binary contains no title-specific logic.
 use keygen_engine::project::ProjectManifest;
+use keygen_engine::runtime::{AppCoordinator, SessionInput, SessionManifest};
+use keygen_engine::story::{Block, Command, Program, Tag, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn usage() -> &'static str {
-    "usage:\n  keygen inspect PROJECT\n  keygen validate PROJECT\n  keygen load PROJECT\n  keygen render PROJECT --scene FILE --output PNG [--time SECONDS]\n\nlegacy scene mode:\n  keygen --scene FILE [--render PNG] [--time SECONDS] [--smoke-seconds SECONDS] [--validate]"
+    "usage:\n  keygen inspect PROJECT\n  keygen validate PROJECT\n  keygen load PROJECT\n  keygen render PROJECT --scene FILE --output PNG [--time SECONDS]\n  keygen e2e PROJECT\n\nlegacy scene mode:\n  keygen --scene FILE [--render PNG] [--time SECONDS] [--smoke-seconds SECONDS] [--validate]"
 }
 
 fn main() {
@@ -36,9 +39,55 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "load" => project_summary(project(&args, 1)?, true),
         "render" => render_project(&args),
+        "e2e" => e2e_project(&args),
         "help" | "--help" | "-h" => Err(usage().into()),
         other => Err(format!("unknown command: {other}")),
     }
+}
+
+fn e2e_project(args: &[String]) -> Result<(), String> {
+    let manifest = project(args, 1)?;
+    let project_manifest = SessionManifest {
+        schema: "keygen.project.v1".into(),
+        id: manifest.project.id.clone(),
+        display_name: manifest.project.display_name.clone(),
+        entry_program: manifest
+            .story
+            .as_ref()
+            .map(|s| s.entry.clone())
+            .unwrap_or_else(|| "main".into()),
+        assets: manifest
+            .assets
+            .iter()
+            .map(|a| (a.id.clone(), a.logical_path.clone()))
+            .collect(),
+        capabilities: vec![],
+    };
+    let program = Program {
+        schema: "keygen.story.v1".into(),
+        blocks: vec![Block {
+            id: "main".into(),
+            commands: vec![Command {
+                tag: Tag::Dialog,
+                args: [("text".into(), Value::String("KeyGen session ready".into()))]
+                    .into_iter()
+                    .collect(),
+            }],
+        }],
+        labels: [("main".into(), 0)].into_iter().collect::<BTreeMap<_, _>>(),
+    };
+    let mut app = AppCoordinator::new();
+    app.advance_boot(1);
+    app.launch_story(project_manifest, program)?;
+    let output = app.step_story(SessionInput::Activate)?;
+    println!(
+        "e2e OK: {} → {:?} ({} effects)",
+        manifest.project.id,
+        app.phase,
+        output.effects.len()
+    );
+    app.close();
+    Ok(())
 }
 
 fn project(args: &[String], index: usize) -> Result<ProjectManifest, String> {

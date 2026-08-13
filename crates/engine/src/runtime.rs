@@ -88,6 +88,76 @@ pub struct ProjectSession {
     pub route: Route,
     assets: BTreeSet<String>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppPhase {
+    Boot,
+    Launcher,
+    Story,
+    Closed,
+}
+
+/// Product-neutral vertical coordinator used by native and headless hosts.
+pub struct AppCoordinator {
+    pub phase: AppPhase,
+    pub ticks: u64,
+    pub session: Option<ProjectSession>,
+}
+
+impl AppCoordinator {
+    pub fn new() -> Self {
+        Self {
+            phase: AppPhase::Boot,
+            ticks: 0,
+            session: None,
+        }
+    }
+
+    pub fn advance_boot(&mut self, ticks: u64) {
+        if self.phase == AppPhase::Boot {
+            self.ticks = self.ticks.saturating_add(ticks);
+            if self.ticks >= 1 {
+                self.phase = AppPhase::Launcher;
+            }
+        }
+    }
+
+    pub fn launch_story(
+        &mut self,
+        manifest: SessionManifest,
+        program: Program,
+    ) -> Result<(), String> {
+        if self.phase != AppPhase::Launcher {
+            return Err("story launch requires the launcher phase".into());
+        }
+        self.session = Some(ProjectSession::new(manifest, program)?);
+        self.phase = AppPhase::Story;
+        Ok(())
+    }
+
+    pub fn step_story(&mut self, input: SessionInput) -> Result<SessionOutput, String> {
+        if self.phase != AppPhase::Story {
+            return Err("story step requires the story phase".into());
+        }
+        let session = self.session.as_mut().ok_or("story session is missing")?;
+        let output = session.step(input)?;
+        if output.finished {
+            self.phase = AppPhase::Launcher;
+        }
+        Ok(output)
+    }
+
+    pub fn close(&mut self) {
+        self.session = None;
+        self.phase = AppPhase::Closed;
+    }
+}
+
+impl Default for AppCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl ProjectSession {
     pub fn new(manifest: SessionManifest, program: Program) -> Result<Self, String> {
         if manifest.schema != "keygen.project.v1" || manifest.id.is_empty() {
