@@ -15,6 +15,59 @@ use std::{
 
 pub mod native;
 pub mod storage;
+pub mod story;
+
+/// Resolve a launcher route to its packaged scene document.
+///
+/// The project manifest is the declaration of the mapping (`route.scene`),
+/// while the package convention keeps scene documents in `scenes/`.  We only
+/// accept a single safe filename and never follow route-provided directories;
+/// this keeps a malformed package from escaping its package root.
+pub fn resolve_route_scene(
+    project_root: &Path,
+    project: &ProjectManifest,
+    route_id: &str,
+) -> Result<PathBuf, String> {
+    let route = project
+        .routes
+        .iter()
+        .find(|route| route.id == route_id)
+        .ok_or_else(|| format!("unknown project route: {route_id}"))?;
+    let declared = route.scene.as_str();
+    if declared.is_empty()
+        || declared.contains('/')
+        || declared.contains('\\')
+        || declared.contains('\0')
+        || Path::new(declared).is_absolute()
+    {
+        return Err(format!("route {} has unsafe scene mapping", route.id));
+    }
+    let stem = declared.strip_prefix("scene.").unwrap_or(declared);
+    let filename = if stem.ends_with(".json") {
+        stem.to_owned()
+    } else {
+        format!("{stem}.json")
+    };
+    let candidate = project_root.join("scenes").join(filename);
+    if !candidate.is_file() {
+        return Err(format!(
+            "route {} scene not found: {}",
+            route.id,
+            candidate.display()
+        ));
+    }
+    Ok(candidate)
+}
+
+/// Resolve and load a route's legacy renderable scene document.
+pub fn load_route_scene(
+    project_root: &Path,
+    project: &ProjectManifest,
+    route_id: &str,
+) -> Result<Scene, String> {
+    let path = resolve_route_scene(project_root, project, route_id)?;
+    load_scene(&path)
+}
 
 #[derive(Debug)]
 struct Args {
@@ -306,4 +359,82 @@ fn next_enabled(scene: &Scene, current: usize, direction: isize) -> usize {
         }
     }
     current
+}
+
+#[cfg(test)]
+mod route_scene_tests {
+    use super::resolve_route_scene;
+    use keygen_engine::project::{
+        ProjectAsset, ProjectIdentity, ProjectManifest, ProjectRoute, ProjectScene, Viewport,
+    };
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn project(scene: &str) -> ProjectManifest {
+        ProjectManifest {
+            schema: keygen_engine::project::SCHEMA.into(),
+            project: ProjectIdentity {
+                id: "test".into(),
+                display_name: "Test".into(),
+                version: "1".into(),
+            },
+            viewport: Viewport {
+                width: 1,
+                height: 1,
+            },
+            assets: vec![ProjectAsset {
+                id: "asset".into(),
+                kind: "image".into(),
+                logical_path: "asset.png".into(),
+                sha256: "0".repeat(64),
+            }],
+            scenes: vec![ProjectScene {
+                id: scene.into(),
+                asset_ids: vec!["asset".into()],
+            }],
+            routes: vec![ProjectRoute {
+                id: "start".into(),
+                scene: scene.into(),
+                story_entry: None,
+            }],
+            story: None,
+            persistence: Default::default(),
+        }
+    }
+
+    #[test]
+    fn resolves_declared_scene_id_to_adjacent_json() {
+        let root = std::env::temp_dir().join(format!(
+            "keygen-route-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("scenes")).unwrap();
+        fs::write(root.join("scenes/boot.json"), b"{}").unwrap();
+        assert_eq!(
+            resolve_route_scene(&root, &project("boot"), "start").unwrap(),
+            root.join("scenes/boot.json")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn route_resolution_uses_basename_without_leaking_outside_package() {
+        let root = std::env::temp_dir().join(format!(
+            "keygen-route-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("scenes")).unwrap();
+        fs::write(root.join("scenes/boot.json"), b"{}").unwrap();
+        assert!(resolve_route_scene(&root, &project("../boot"), "start").is_err());
+        assert!(resolve_route_scene(&root, &project("scene.boot"), "start").is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
 }
