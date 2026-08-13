@@ -252,6 +252,33 @@ impl Canvas {
     pub fn fill_rect(&mut self, rect: [f32; 4], color: [u8; 4]) {
         self.rect(rect, color, None);
     }
+    /// Draw an evenly spaced dot field inside a rectangular clip without
+    /// expanding each dot into a full-canvas rectangle pass.
+    pub fn dot_grid(&mut self, [x, y, w, h]: [f32; 4], spacing: u32, radius: u32, color: [u8; 4]) {
+        if spacing == 0 || radius == 0 || w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let start_x = x.floor().max(0.0) as i32;
+        let start_y = y.floor().max(0.0) as i32;
+        let end_x = (x + w).ceil().min(self.width() as f32) as i32;
+        let end_y = (y + h).ceil().min(self.height() as f32) as i32;
+        for center_y in (start_y..end_y).step_by(spacing as usize) {
+            for center_x in (start_x..end_x).step_by(spacing as usize) {
+                for offset_y in -(radius as i32)..=radius as i32 {
+                    for offset_x in -(radius as i32)..=radius as i32 {
+                        if offset_x * offset_x + offset_y * offset_y <= (radius * radius) as i32 {
+                            self.surface.blend(
+                                center_x + offset_x,
+                                center_y + offset_y,
+                                color,
+                                1.0,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     pub fn stroke_rect(&mut self, rect: [f32; 4], color: [u8; 4], width: f32) {
         self.rect(rect, color, Some(width));
     }
@@ -462,6 +489,21 @@ mod tests {
         assert_eq!(canvas.surface().pixels[24..28], [220, 10, 30, 255]);
         assert_eq!(canvas.surface().pixels[52..56], [220, 10, 30, 255]);
         assert_eq!(canvas.surface().pixels[0..4], [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn dot_grid_is_clipped_and_deterministic() {
+        let mut canvas = Canvas::new(12, 10, [0, 0, 0, 255]);
+        canvas.dot_grid([2.0, 2.0, 7.0, 5.0], 4, 1, [255, 255, 255, 128]);
+        let first = canvas.encode_png().unwrap();
+        let mut replay = Canvas::new(12, 10, [0, 0, 0, 255]);
+        replay.dot_grid([2.0, 2.0, 7.0, 5.0], 4, 1, [255, 255, 255, 128]);
+        assert_eq!(first, replay.encode_png().unwrap());
+        assert_eq!(canvas.surface().pixels[0..4], [0, 0, 0, 255]);
+        assert_ne!(
+            canvas.surface().pixels[((2 * 12 + 2) * 4)..((2 * 12 + 2) * 4 + 4)],
+            [0, 0, 0, 255]
+        );
     }
 
     #[test]
