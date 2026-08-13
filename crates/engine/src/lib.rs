@@ -6,15 +6,16 @@
 
 pub mod audio;
 mod compositor;
-mod image;
+pub mod image;
 pub mod input;
 pub mod model;
 pub mod project;
 pub mod runtime;
 pub mod story;
-mod surface;
+pub mod surface;
 
 pub mod scene;
 
 pub use compositor::{ease, entrance_settled, Scene, SceneAssets};
 pub use surface::Surface;
+pub use surface::{Canvas, FontFace, ImageFit};

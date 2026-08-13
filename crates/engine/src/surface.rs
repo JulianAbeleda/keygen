@@ -1,4 +1,5 @@
 use crate::image::Image;
+use fontdue::{Font, FontSettings};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Surface {
@@ -187,6 +188,232 @@ impl Surface {
     }
 }
 
+/// How an image is fitted into a destination rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFit {
+    Contain,
+    Cover,
+    Stretch,
+}
+
+/// A decoded font that can be reused by a [`Canvas`].
+#[derive(Clone)]
+pub struct FontFace(Font);
+
+impl FontFace {
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
+        Font::from_bytes(bytes, FontSettings::default())
+            .map(Self)
+            .map_err(|e| format!("cannot decode font: {e}"))
+    }
+
+    pub fn measure(&self, text: &str, size: f32, letter_spacing: f32) -> [f32; 2] {
+        let mut width: f32 = 0.0;
+        let mut height: f32 = 0.0;
+        for (index, character) in text.chars().enumerate() {
+            let metrics = self.0.metrics(character, size);
+            if index > 0 {
+                width += letter_spacing;
+            }
+            width += metrics.advance_width;
+            height = height.max(metrics.height as f32);
+        }
+        [width, height]
+    }
+}
+
+/// Small immediate-mode drawing facade for hosts and product crates.
+/// Coordinates are design-space pixels and output is deterministic RGBA8.
+pub struct Canvas {
+    surface: Surface,
+}
+
+impl Canvas {
+    pub fn new(width: u32, height: u32, clear: [u8; 4]) -> Self {
+        Self {
+            surface: Surface::new(width, height, clear),
+        }
+    }
+    pub fn width(&self) -> u32 {
+        self.surface.width
+    }
+    pub fn height(&self) -> u32 {
+        self.surface.height
+    }
+    pub fn clear(&mut self, color: [u8; 4]) {
+        self.surface = Surface::new(self.width(), self.height(), color);
+    }
+    pub fn surface(&self) -> &Surface {
+        &self.surface
+    }
+    pub fn into_surface(self) -> Surface {
+        self.surface
+    }
+    pub fn fill_rect(&mut self, rect: [f32; 4], color: [u8; 4]) {
+        self.rect(rect, color, None);
+    }
+    pub fn stroke_rect(&mut self, rect: [f32; 4], color: [u8; 4], width: f32) {
+        self.rect(rect, color, Some(width));
+    }
+    fn rect(&mut self, [x, y, w, h]: [f32; 4], color: [u8; 4], stroke: Option<f32>) {
+        let edge = stroke.unwrap_or(h.max(w));
+        for py in 0..self.height() as i32 {
+            for px in 0..self.width() as i32 {
+                let inside = (px as f32) >= x
+                    && (px as f32) < x + w
+                    && (py as f32) >= y
+                    && (py as f32) < y + h;
+                let border = stroke.is_some()
+                    && ((px as f32) < x + edge
+                        || (px as f32) >= x + w - edge
+                        || (py as f32) < y + edge
+                        || (py as f32) >= y + h - edge);
+                if inside && (stroke.is_none() || border) {
+                    self.surface.blend(px, py, color, 1.0);
+                }
+            }
+        }
+    }
+    pub fn rounded_rect(&mut self, [x, y, w, h]: [f32; 4], radius: f32, color: [u8; 4]) {
+        let r = radius.max(0.0).min(w.min(h) / 2.0);
+        for py in 0..self.height() as i32 {
+            for px in 0..self.width() as i32 {
+                let qx = (px as f32 - (x + r).max(x).min(x + w - r)).abs();
+                let qy = (py as f32 - (y + r).max(y).min(y + h - r)).abs();
+                if qx * qx + qy * qy <= r * r
+                    || ((px as f32) >= x + r && (px as f32) < x + w - r)
+                    || ((py as f32) >= y + r && (py as f32) < y + h - r)
+                {
+                    self.surface.blend(px, py, color, 1.0);
+                }
+            }
+        }
+    }
+    pub fn polygon(&mut self, points: &[[f32; 2]], color: [u8; 4]) {
+        if points.len() < 3 {
+            return;
+        }
+        let min_x = points
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as i32;
+        let max_x = points
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(self.width() as f32) as i32;
+        let min_y = points
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as i32;
+        let max_y = points
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(self.height() as f32) as i32;
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let mut hit = false;
+                let mut j = points.len() - 1;
+                for i in 0..points.len() {
+                    let (xi, yi) = (points[i][0], points[i][1]);
+                    let (xj, yj) = (points[j][0], points[j][1]);
+                    if ((yi > y as f32) != (yj > y as f32))
+                        && ((x as f32) < (xj - xi) * (y as f32 - yi) / (yj - yi) + xi)
+                    {
+                        hit = !hit;
+                    }
+                    j = i;
+                }
+                if hit {
+                    self.surface.blend(x, y, color, 1.0);
+                }
+            }
+        }
+    }
+    pub fn image(&mut self, image: &Image, rect: [f32; 4], fit: ImageFit, opacity: f32) {
+        let (x, y, w, h) = (rect[0], rect[1], rect[2], rect[3]);
+        let scale = match fit {
+            ImageFit::Stretch => 1.0,
+            ImageFit::Contain => (w / image.width as f32).min(h / image.height as f32),
+            ImageFit::Cover => (w / image.width as f32).max(h / image.height as f32),
+        };
+        let dw = image.width as f32 * scale;
+        let dh = image.height as f32 * scale;
+        let left = x + (w - dw) / 2.0;
+        let top = y + (h - dh) / 2.0;
+        self.surface.draw_image(image, left, top, scale, opacity);
+    }
+    pub fn text(
+        &mut self,
+        face: &FontFace,
+        text: &str,
+        origin: [f32; 2],
+        size: f32,
+        color: [u8; 4],
+        outline: Option<(f32, [u8; 4])>,
+    ) {
+        self.text_spaced(face, text, origin, size, color, outline, 0.0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_spaced(
+        &mut self,
+        face: &FontFace,
+        text: &str,
+        origin: [f32; 2],
+        size: f32,
+        color: [u8; 4],
+        outline: Option<(f32, [u8; 4])>,
+        letter_spacing: f32,
+    ) {
+        let mut x = origin[0];
+        for (index, ch) in text.chars().enumerate() {
+            if index > 0 {
+                x += letter_spacing;
+            }
+            let (metrics, bitmap) = face.0.rasterize(ch, size);
+            let glyph_x = x + metrics.xmin as f32;
+            let glyph_y = origin[1] - metrics.ymin as f32 - metrics.height as f32;
+            for gy in 0..metrics.height {
+                for gx in 0..metrics.width {
+                    let a = bitmap[gy * metrics.width + gx];
+                    if a > 0 {
+                        if let Some((radius, oc)) = outline {
+                            for oy in -(radius as i32)..=radius as i32 {
+                                for ox in -(radius as i32)..=radius as i32 {
+                                    self.surface.blend(
+                                        glyph_x as i32 + gx as i32 + ox,
+                                        glyph_y as i32 + gy as i32 + oy,
+                                        oc,
+                                        f32::from(a) / 255.0,
+                                    );
+                                }
+                            }
+                        }
+                        self.surface.blend(
+                            glyph_x as i32 + gx as i32,
+                            glyph_y as i32 + gy as i32,
+                            color,
+                            f32::from(a) / 255.0,
+                        );
+                    }
+                }
+            }
+            x += metrics.advance_width;
+        }
+    }
+    pub fn encode_png(&self) -> Result<Vec<u8>, String> {
+        self.surface.encode_png()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +472,16 @@ mod tests {
         );
         let center = ((2 * 7 + 3) * 4) as usize;
         assert_eq!(&surface.pixels[center..center + 3], &[40, 40, 40]);
+    }
+
+    #[test]
+    fn canvas_primitives_and_png_are_deterministic() {
+        let mut canvas = Canvas::new(16, 12, [0, 0, 0, 255]);
+        canvas.fill_rect([1.0, 1.0, 4.0, 3.0], [255, 0, 0, 255]);
+        canvas.polygon(&[[6.0, 1.0], [12.0, 1.0], [9.0, 6.0]], [0, 255, 0, 255]);
+        let first = canvas.encode_png().expect("png");
+        let second = canvas.encode_png().expect("png");
+        assert_eq!(first, second);
+        assert!(first.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 }
