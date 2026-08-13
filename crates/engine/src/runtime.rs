@@ -2,6 +2,7 @@
 //!
 //! A project supplies a manifest and story program; hosts supply rendering, audio,
 //! filesystem, and platform capabilities. No product identifiers belong here.
+use crate::project::{ProjectManifest, ProjectRoute};
 use crate::story::{Effect, Program, Snapshot, Tag, Value, Vm};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,6 +65,80 @@ pub enum Route {
     Launcher,
     Story { entry: String },
     App { id: String },
+    Closed,
+}
+
+/// Title-neutral navigation over the routes declared by a compiled project.
+///
+/// Hosts own presentation and input translation; this type owns the route
+/// contract so a native window and a headless runner make the same decisions.
+/// In particular, a launcher selection is resolved from `project.routes`
+/// rather than from filenames or product-specific constants.
+#[derive(Clone, Debug)]
+pub struct ProjectRouteNavigator {
+    project: ProjectManifest,
+    route: Route,
+}
+
+impl ProjectRouteNavigator {
+    pub fn new(project: ProjectManifest) -> Result<Self, String> {
+        project.validate()?;
+        Ok(Self {
+            project,
+            route: Route::Boot,
+        })
+    }
+
+    pub fn project(&self) -> &ProjectManifest {
+        &self.project
+    }
+
+    pub fn route(&self) -> &Route {
+        &self.route
+    }
+
+    pub fn launcher_routes(&self) -> &[ProjectRoute] {
+        &self.project.routes
+    }
+
+    pub fn advance_boot(&mut self) {
+        if self.route == Route::Boot {
+            self.route = Route::Launcher;
+        }
+    }
+
+    pub fn activate(&mut self, route_id: &str) -> Result<Route, String> {
+        if self.route != Route::Launcher {
+            return Err("route activation requires the launcher route".into());
+        }
+        let route = self
+            .project
+            .routes
+            .iter()
+            .find(|candidate| candidate.id == route_id)
+            .ok_or_else(|| format!("unknown project route: {route_id}"))?;
+        self.route = match &route.story_entry {
+            Some(entry) => Route::Story {
+                entry: entry.clone(),
+            },
+            None => Route::App {
+                id: route.id.clone(),
+            },
+        };
+        Ok(self.route.clone())
+    }
+
+    pub fn back(&mut self) {
+        match self.route {
+            Route::Story { .. } | Route::App { .. } => self.route = Route::Launcher,
+            Route::Launcher => self.route = Route::Boot,
+            Route::Boot | Route::Closed => {}
+        }
+    }
+
+    pub fn close(&mut self) {
+        self.route = Route::Closed;
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -240,6 +315,49 @@ mod tests {
                 version: 1,
             }],
         }
+    }
+
+    #[test]
+    fn project_routes_drive_explicit_boot_launcher_story_transitions() {
+        let project = crate::project::ProjectManifest {
+            schema: crate::project::SCHEMA.into(),
+            project: crate::project::ProjectIdentity {
+                id: "sample.project".into(),
+                display_name: "Sample".into(),
+                version: "0.1.0".into(),
+            },
+            viewport: crate::project::Viewport {
+                width: 1,
+                height: 1,
+            },
+            assets: vec![],
+            scenes: vec![crate::project::ProjectScene {
+                id: "scene.start".into(),
+                asset_ids: vec![],
+            }],
+            routes: vec![crate::project::ProjectRoute {
+                id: "route.start".into(),
+                scene: "scene.start".into(),
+                story_entry: Some("start".into()),
+            }],
+            story: Some(crate::project::ProjectStory {
+                entry: "start".into(),
+                labels: vec!["start".into()],
+            }),
+            persistence: Default::default(),
+        };
+        let mut navigator = ProjectRouteNavigator::new(project).unwrap();
+        assert_eq!(navigator.route(), &Route::Boot);
+        navigator.advance_boot();
+        assert_eq!(navigator.route(), &Route::Launcher);
+        assert_eq!(
+            navigator.activate("route.start").unwrap(),
+            Route::Story {
+                entry: "start".into()
+            }
+        );
+        navigator.back();
+        assert_eq!(navigator.route(), &Route::Launcher);
     }
     #[test]
     fn validates_capabilities() {

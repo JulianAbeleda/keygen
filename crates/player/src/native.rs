@@ -10,6 +10,7 @@ use keygen_engine::input::{Device, InputEvent, InputEventKind, Key, PointerButto
 use std::process::Command;
 use std::{
     collections::BTreeMap,
+    collections::VecDeque,
     path::{Path, PathBuf},
     process::Child,
 };
@@ -299,6 +300,97 @@ pub enum AudioCommand {
 
 pub trait AudioBackend {
     fn submit(&mut self, command: AudioCommand) -> Result<(), String>;
+}
+
+/// Logical text-input events understood by the engine.  A Cocoa adapter can
+/// translate `NSTextInputClient` callbacks into this contract without making
+/// the story/runtime depend on AppKit.  Strings are owned and bounded by the
+/// adapter before they cross the host boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TextInputEvent {
+    CompositionStarted,
+    CompositionUpdated(String),
+    CompositionCommitted(String),
+    CompositionCancelled,
+}
+
+/// Safe, platform-neutral composition buffer.  This is deliberately an
+/// event adapter rather than a claim that the current minifb window accepts
+/// IME input: `native_capabilities().text_input` remains false until a real
+/// AppKit text-input client is connected to it.
+#[derive(Clone, Debug)]
+pub struct MacOsTextInputAdapter {
+    max_bytes: usize,
+    composition: String,
+    events: VecDeque<TextInputEvent>,
+}
+
+impl MacOsTextInputAdapter {
+    pub const DEFAULT_MAX_BYTES: usize = 4096;
+
+    pub fn new(max_bytes: usize) -> Result<Self, String> {
+        if max_bytes == 0 {
+            return Err("text-input maximum must be greater than zero".into());
+        }
+        Ok(Self {
+            max_bytes,
+            composition: String::new(),
+            events: VecDeque::new(),
+        })
+    }
+
+    pub fn with_default_limit() -> Self {
+        Self::new(Self::DEFAULT_MAX_BYTES).expect("default text-input limit is non-zero")
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    pub fn composition(&self) -> &str {
+        &self.composition
+    }
+
+    pub fn begin_composition(&mut self) {
+        self.composition.clear();
+        self.events.push_back(TextInputEvent::CompositionStarted);
+    }
+
+    pub fn update_composition(&mut self, text: &str) {
+        self.composition = bounded_text(text, self.max_bytes);
+        self.events
+            .push_back(TextInputEvent::CompositionUpdated(self.composition.clone()));
+    }
+
+    pub fn commit(&mut self, text: &str) {
+        let committed = bounded_text(text, self.max_bytes);
+        self.composition.clear();
+        self.events
+            .push_back(TextInputEvent::CompositionCommitted(committed));
+    }
+
+    pub fn cancel(&mut self) {
+        self.composition.clear();
+        self.events.push_back(TextInputEvent::CompositionCancelled);
+    }
+
+    pub fn drain_events(&mut self) -> impl Iterator<Item = TextInputEvent> + '_ {
+        self.events.drain(..)
+    }
+}
+
+fn bounded_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        if index + character.len_utf8() > max_bytes {
+            break;
+        }
+        end = index + character.len_utf8();
+    }
+    text[..end].to_owned()
 }
 
 /// System audio adapter for macOS. `afplay` is a shipped macOS client of the
@@ -594,6 +686,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn text_input_preserves_composition_lifecycle_and_bounds_utf8() {
+        let mut input = MacOsTextInputAdapter::new(4).unwrap();
+        input.begin_composition();
+        input.update_composition("ab😀");
+        input.commit("日本語");
+        assert_eq!(input.composition(), "");
+        assert_eq!(
+            input.drain_events().collect::<Vec<_>>(),
+            vec![
+                TextInputEvent::CompositionStarted,
+                TextInputEvent::CompositionUpdated("ab".into()),
+                TextInputEvent::CompositionCommitted("日".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_input_cancel_discards_pending_composition() {
+        let mut input = MacOsTextInputAdapter::with_default_limit();
+        input.begin_composition();
+        input.update_composition("候補");
+        input.cancel();
+        assert_eq!(input.composition(), "");
+        assert!(matches!(
+            input.drain_events().last(),
+            Some(TextInputEvent::CompositionCancelled)
+        ));
+        assert!(MacOsTextInputAdapter::new(0).is_err());
     }
 
     #[test]
