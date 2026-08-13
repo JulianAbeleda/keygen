@@ -65,6 +65,82 @@ pub trait PresentationBackend {
     fn lifecycle_state(&self) -> LifecycleState;
 }
 
+/// Generic launch identity passed from a bundle or an embedding host.  The
+/// engine never infers a product name or a product-specific route from argv.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostLaunchSpec {
+    pub target: String,
+    pub bundle_id: String,
+    pub initial_route: String,
+    pub restore_session: bool,
+}
+
+impl HostLaunchSpec {
+    pub fn new(target: impl Into<String>, bundle_id: impl Into<String>) -> Self {
+        Self {
+            target: target.into(),
+            bundle_id: bundle_id.into(),
+            initial_route: "boot".into(),
+            restore_session: true,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.target.is_empty() || self.bundle_id.is_empty() {
+            return Err("host launch identity must not be empty".into());
+        }
+        if self.initial_route.is_empty() {
+            return Err("host launch route must not be empty".into());
+        }
+        Ok(())
+    }
+}
+
+/// Coordinates lifecycle events with persistence without coupling the player
+/// to AppKit. A native host supplies the save callback and may then translate
+/// the returned decision into its window/application API.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QuitDecision {
+    Continue,
+    Quit,
+}
+
+pub trait SaveBarrier {
+    fn flush(&mut self) -> Result<(), String>;
+}
+
+pub struct HostLifecycle<S> {
+    state: LifecycleState,
+    save: S,
+}
+
+impl<S: SaveBarrier> HostLifecycle<S> {
+    pub fn new(save: S) -> Self {
+        Self {
+            state: LifecycleState::Active,
+            save,
+        }
+    }
+
+    pub fn state(&self) -> LifecycleState {
+        self.state
+    }
+
+    pub fn event(&mut self, event: LifecycleEvent) -> Result<(), String> {
+        if event == LifecycleEvent::QuitRequested {
+            self.save.flush()?;
+        }
+        self.state.apply(event);
+        Ok(())
+    }
+
+    pub fn request_quit(&mut self) -> Result<QuitDecision, String> {
+        self.save.flush()?;
+        self.state.apply(LifecycleEvent::QuitRequested);
+        Ok(QuitDecision::Quit)
+    }
+}
+
 /// Audio is intentionally an effect sink, not a renderer concern. The story
 /// VM emits logical clip/channel commands and a platform adapter decides how
 /// to decode and schedule them (CoreAudio on macOS, a test sink in CI).
@@ -359,5 +435,32 @@ mod tests {
             .present(HostFrame::new(viewport, 4, vec![0; 4]).unwrap())
             .is_err());
         assert_eq!(backend.frames, vec![3]);
+    }
+
+    #[test]
+    fn launch_spec_is_product_neutral_and_validated() {
+        let spec = HostLaunchSpec::new("sample", "org.example.sample");
+        assert_eq!(spec.initial_route, "boot");
+        assert!(spec.validate().is_ok());
+        assert!(HostLaunchSpec::new("", "org.example.sample")
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn quit_flushes_before_transitioning() {
+        struct Save {
+            flushed: bool,
+        }
+        impl SaveBarrier for Save {
+            fn flush(&mut self) -> Result<(), String> {
+                self.flushed = true;
+                Ok(())
+            }
+        }
+        let mut host = HostLifecycle::new(Save { flushed: false });
+        assert_eq!(host.request_quit(), Ok(QuitDecision::Quit));
+        assert_eq!(host.state(), LifecycleState::Terminating);
+        assert!(host.save.flushed);
     }
 }
