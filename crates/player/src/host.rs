@@ -47,6 +47,9 @@ pub struct WindowPolicy {
     /// Physical raster pixels per logical drawing pixel. A value of 2 renders
     /// crisp text on common Retina displays while preserving app coordinates.
     pub pixel_density: u8,
+    /// Maximum presentation rate. Keeping this explicit prevents static native
+    /// screens from consuming a full CPU core in the platform event loop.
+    pub target_fps: usize,
     pub resizable: bool,
     pub fullscreen: bool,
     pub title: String,
@@ -58,6 +61,7 @@ impl Default for WindowPolicy {
             width: 1280,
             height: 720,
             pixel_density: 1,
+            target_fps: 60,
             resizable: true,
             fullscreen: false,
             title: "KeyGen".into(),
@@ -71,6 +75,9 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     if !(1..=4).contains(&policy.pixel_density) {
         return Err("window pixel_density must be between 1 and 4".into());
     }
+    if !(1..=240).contains(&policy.target_fps) {
+        return Err("window target_fps must be between 1 and 240".into());
+    }
     let mut options = WindowOptions {
         resize: policy.resizable,
         ..WindowOptions::default()
@@ -78,6 +85,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     options.borderless = policy.fullscreen;
     let mut window = Window::new(&policy.title, policy.width, policy.height, options)
         .map_err(|e| e.to_string())?;
+    window.set_target_fps(policy.target_fps);
     let text = Rc::new(RefCell::new(Vec::new()));
     window.set_input_callback(Box::new(TextCollector { text: text.clone() }));
     let started = Instant::now();
