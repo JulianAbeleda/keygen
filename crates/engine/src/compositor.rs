@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 pub struct SceneAssets {
     pub font: Vec<u8>,
+    pub fonts: HashMap<String, Vec<u8>>,
     pub layers: HashMap<String, Vec<u8>>,
     pub particle: Option<Vec<u8>>,
 }
@@ -20,6 +21,7 @@ pub struct Scene {
     images: HashMap<String, Image>,
     particle: Option<Image>,
     font: Font,
+    fonts: HashMap<String, Font>,
 }
 
 impl Scene {
@@ -41,11 +43,20 @@ impl Scene {
         };
         let font = Font::from_bytes(assets.font, FontSettings::default())
             .map_err(|error| format!("cannot decode font: {error}"))?;
+        let mut fonts = HashMap::new();
+        for (path, bytes) in assets.fonts {
+            fonts.insert(
+                path,
+                Font::from_bytes(bytes, FontSettings::default())
+                    .map_err(|error| format!("cannot decode alternate font: {error}"))?,
+            );
+        }
         Ok(Self {
             spec,
             images,
             particle,
             font,
+            fonts,
         })
     }
 
@@ -58,6 +69,17 @@ impl Scene {
         self.draw_menu_insertion(&mut surface, focused, 0);
         self.draw_particle_insertions(&mut surface, time, 0);
         for (layer_index, layer) in self.spec.layers.iter().enumerate() {
+            if layer
+                .visible_when_focused
+                .is_some_and(|index| index != focused)
+            {
+                // Conditional visibility does not remove the layer's slot
+                // from z-order. Insertions are indexed by the declarative
+                // layer list, so they still run after an invisible layer.
+                self.draw_menu_insertion(&mut surface, focused, layer_index + 1);
+                self.draw_particle_insertions(&mut surface, time, layer_index + 1);
+                continue;
+            }
             let Some(image) = self.images.get(&layer.id) else {
                 continue;
             };
@@ -79,14 +101,42 @@ impl Scene {
                 x += motion.dx * phase;
                 y += motion.dy * phase;
             }
+            let source = layer
+                .source_rect
+                .unwrap_or([0, 0, image.width, image.height]);
+            if source[0].saturating_add(source[2]) > image.width
+                || source[1].saturating_add(source[3]) > image.height
+            {
+                continue;
+            }
+            let target_size = layer
+                .nine_slice
+                .map(|slice| (slice.width * scale, slice.height * scale))
+                .unwrap_or((source[2] as f32 * scale, source[3] as f32 * scale));
             let (left, top) = match layer.anchor {
                 Anchor::TopLeft => (x, y),
-                Anchor::Center => (
-                    x - image.width as f32 * scale * 0.5,
-                    y - image.height as f32 * scale * 0.5,
-                ),
+                Anchor::Center => (x - target_size.0 * 0.5, y - target_size.1 * 0.5),
             };
-            surface.draw_image(image, left, top, scale, layer.alpha);
+            if let Some(slice) = layer.nine_slice {
+                if slice.left.saturating_add(slice.right) >= source[2]
+                    || slice.top.saturating_add(slice.bottom) >= source[3]
+                {
+                    continue;
+                }
+                surface.draw_image_nine_slice(
+                    image,
+                    left,
+                    top,
+                    scale,
+                    layer.alpha,
+                    source,
+                    [slice.left, slice.top, slice.right, slice.bottom],
+                    slice.width,
+                    slice.height,
+                );
+            } else {
+                surface.draw_image_region(image, left, top, scale, layer.alpha, source);
+            }
             self.draw_menu_insertion(&mut surface, focused, layer_index + 1);
             self.draw_particle_insertions(&mut surface, time, layer_index + 1);
         }
@@ -127,6 +177,10 @@ impl Scene {
                 text.color,
                 text.outline,
                 text.outline_width,
+                text.font_path
+                    .as_deref()
+                    .and_then(|path| self.fonts.get(path))
+                    .unwrap_or(&self.font),
             );
         }
     }
@@ -137,6 +191,11 @@ impl Scene {
         };
         for (index, entry) in menu.entries.iter().enumerate() {
             let y = menu.y + index as f32 * (menu.row_height + menu.spacing);
+            let fill = if index == focused {
+                menu.focused_color.unwrap_or(menu.color)
+            } else {
+                menu.color
+            };
             let outline = if index == focused {
                 menu.focused_outline
             } else {
@@ -148,9 +207,10 @@ impl Scene {
                 menu.x,
                 y,
                 menu.font_size,
-                menu.color,
+                fill,
                 outline,
                 menu.outline_width,
+                &self.font,
             );
         }
     }
@@ -166,6 +226,7 @@ impl Scene {
         fill: Color,
         outline: Color,
         radius: u8,
+        font: &Font,
     ) {
         let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
         layout.reset(&LayoutSettings {
@@ -173,9 +234,9 @@ impl Scene {
             y,
             ..LayoutSettings::default()
         });
-        layout.append(&[&self.font], &TextStyle::new(text, size, 0));
+        layout.append(&[font], &TextStyle::new(text, size, 0));
         for glyph in layout.glyphs() {
-            let (metrics, bitmap) = self.font.rasterize_config(glyph.key);
+            let (metrics, bitmap) = font.rasterize_config(glyph.key);
             if metrics.width == 0 || metrics.height == 0 {
                 continue;
             }

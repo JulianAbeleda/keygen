@@ -4,13 +4,14 @@
 use keygen_engine::{
     model::SceneSpec, project::ProjectManifest, runtime::ProjectRouteNavigator, Scene, SceneAssets,
 };
-use minifb::{Key, KeyRepeat, MouseButton, MouseMode, ScaleMode, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window};
 use std::{
     collections::HashMap,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    time::Instant,
+    process::Command,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub mod native;
@@ -95,6 +96,16 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
     resolve_scene_paths(&mut spec, base);
 
     let font = read_asset(&spec.font_path, "font")?;
+    let mut fonts = HashMap::new();
+    for path in spec
+        .text_layers
+        .iter()
+        .filter_map(|layer| layer.font_path.as_ref())
+    {
+        if !fonts.contains_key(path) {
+            fonts.insert(path.clone(), read_asset(path, "alternate font")?);
+        }
+    }
     let mut layers = HashMap::new();
     for layer in &spec.layers {
         layers.insert(layer.id.clone(), read_asset(&layer.path, "layer")?);
@@ -108,6 +119,7 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
         spec,
         SceneAssets {
             font,
+            fonts,
             layers,
             particle,
         },
@@ -120,6 +132,11 @@ fn read_asset(path: &str, kind: &str) -> Result<Vec<u8>, String> {
 
 fn resolve_scene_paths(spec: &mut SceneSpec, base: &Path) {
     spec.font_path = resolve_path(base, &spec.font_path);
+    for text in &mut spec.text_layers {
+        if let Some(path) = &mut text.font_path {
+            *path = resolve_path(base, path);
+        }
+    }
     for layer in &mut spec.layers {
         layer.path = resolve_path(base, &layer.path);
     }
@@ -240,17 +257,30 @@ fn run_window(
     native::require_supported_host()?;
     let width = scene.spec.design_width as usize;
     let height = scene.spec.design_height as usize;
+    let display_size = scene
+        .spec
+        .fit_window_to_display
+        .then(native::active_display_size)
+        .transpose()?
+        .flatten();
+    let window_width = display_size
+        .map(|size| size.0)
+        .or(scene.spec.window_width.map(|value| value as usize))
+        .unwrap_or(width);
+    let window_height = display_size
+        .map(|size| size.1)
+        .or(scene.spec.window_height.map(|value| value as usize))
+        .unwrap_or(height);
     let mut window = Window::new(
         &scene.spec.title,
-        width,
-        height,
-        WindowOptions {
-            resize: true,
-            scale_mode: ScaleMode::AspectRatioStretch,
-            ..WindowOptions::default()
-        },
+        window_width,
+        window_height,
+        native::window_options(scene.spec.borderless),
     )
     .map_err(|error| format!("cannot create native window: {error}"))?;
+    if scene.spec.borderless {
+        window.set_position(0, 0);
+    }
     window.set_target_fps(60);
     let start = Instant::now();
     let mut focused = first_enabled(&scene, 0);
@@ -259,19 +289,32 @@ fn run_window(
     let package_root = scene_path.parent().and_then(Path::parent);
     let mut story_host = package_root.and_then(|root| StoryHost::load(root).ok());
     let mut story_choice: Option<usize> = None;
+    let mut displayed_minute = None;
     if let Some(router) = navigator.as_mut() {
         router.advance_boot();
     }
     while window.is_open() {
         let elapsed = start.elapsed().as_secs_f32();
+        refresh_system_clock(&mut scene, &mut displayed_minute);
         if smoke_seconds.is_some_and(|seconds| elapsed >= seconds) {
             break;
         }
         if window.is_key_pressed(Key::Escape, KeyRepeat::No) {
-            if let Some(router) = navigator.as_mut() {
-                router.close();
+            if scene.spec.menu.is_none() {
+                if let (Some(router), Some(root)) = (navigator.as_mut(), package_root) {
+                    router.back();
+                    scene = load_scene(&root.join("scenes/boot.json"))?;
+                    focused = first_enabled(&scene, 0);
+                    pressed_entry = None;
+                    story_choice = None;
+                    continue;
+                }
+            } else {
+                if let Some(router) = navigator.as_mut() {
+                    router.close();
+                }
+                break;
             }
-            break;
         }
         if window.is_key_pressed(Key::Down, KeyRepeat::Yes) {
             focused = next_enabled(&scene, focused, 1);
@@ -388,6 +431,47 @@ fn run_window(
             .map_err(|error| format!("native frame failed: {error}"))?;
     }
     Ok(())
+}
+
+fn refresh_system_clock(scene: &mut Scene, displayed_minute: &mut Option<u64>) {
+    let Ok(elapsed) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return;
+    };
+    let minute = elapsed.as_secs() / 60;
+    if *displayed_minute == Some(minute) {
+        return;
+    }
+    let Some(local) = local_clock_24h() else {
+        return;
+    };
+    for layer in &mut scene.spec.text_layers {
+        if layer.system_clock_24h {
+            layer.text.clone_from(&local);
+        }
+    }
+    *displayed_minute = Some(minute);
+}
+
+/// Read the host's local clock at the I/O boundary. The compositor itself
+/// remains deterministic and receives this as ordinary projected text.
+#[cfg(unix)]
+fn local_clock_24h() -> Option<String> {
+    let output = Command::new("/bin/date").arg("+%H:%M").output().ok()?;
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (output.status.success()
+        && value.len() == 5
+        && value.as_bytes()[2] == b':'
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 2 && byte == b':' || index != 2 && byte.is_ascii_digit()))
+    .then(|| value.to_owned())
+}
+
+#[cfg(not(unix))]
+fn local_clock_24h() -> Option<String> {
+    None
 }
 
 fn print_story_frame(frame: &story::StoryFrame) -> Option<usize> {
@@ -529,5 +613,20 @@ mod route_scene_tests {
         assert!(resolve_route_scene(&root, &project("../boot"), "start").is_err());
         assert!(resolve_route_scene(&root, &project("scene.boot"), "start").is_ok());
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::local_clock_24h;
+
+    #[cfg(unix)]
+    #[test]
+    fn host_clock_is_strict_24_hour_text() {
+        let value = local_clock_24h().expect("/bin/date should provide local time");
+        assert_eq!(value.len(), 5);
+        assert_eq!(&value[2..3], ":");
+        assert!(value[..2].parse::<u8>().is_ok_and(|hour| hour < 24));
+        assert!(value[3..].parse::<u8>().is_ok_and(|minute| minute < 60));
     }
 }

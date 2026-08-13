@@ -80,27 +80,36 @@ def build(source: Path, output: Path, limit: int, max_bytes: int) -> dict:
     # this generic: prefer the recovered DOS font/logo when present, but never
     # assume a title-specific asset exists.  The scene itself references only
     # copied package-relative bytes.
-    # Vera is the launcher UI font recovered from the prefab (the generic
-    # handwriting font is used by unrelated poem content and makes the menu
-    # visibly unlike DDLC Plus).
+    # The recovered start-menu labels reference Vera SDF. Its source TTF is
+    # not present in the export, so use the recovered neutral sans fallback;
+    # never fall through to one of the unrelated poem handwriting fonts.
     font = next((candidate for candidate in (
-        find_asset(records, assets, "rificfree-bold.ttf", "font"),
-        find_asset(records, assets, "rificfree-bold-unity.ttf", "font"),
-        find_asset(records, assets, "vera.ttf", "font"),
-        find_asset(records, assets, "vera", "font"),
+        find_asset(records, assets, "liberationsans.ttf", "font"),
+        find_asset(records, assets, "hkgrotesk-medium.otf", "font"),
     ) if candidate is not None), None)
+    desktop_font = find_asset(records, assets, "hkgrotesk-medium.otf", "font") or font
     font = font or next((a for a, r in zip(assets, records) if r["kind"] == "font"), None)
     logo = find_asset(records, assets, "ddlc logo") or find_asset(records, assets, "logo")
     wallpaper = find_asset(records, assets, "gallery_default_wallpaper")
     start_panel = find_asset(records, assets, "start menu background")
-    user_icon = find_asset(records, assets, "user icon")
+    launcher_atlas = find_asset(records, assets, "sactx-2048x4096")
+    drop_shadow = find_asset(records, assets, "uidropshadow.png")
+    heart_glow = find_asset(records, assets, "heart highlight gradient.png")
+    heart_icon = find_asset(records, assets, "heart icon white.png")
     ddlc_icon = find_asset(records, assets, "ddlc icon.png") or find_asset(records, assets, "ddlc icon")
+    ddlc_icon_focused = find_asset(records, assets, "ddlc icon highlight.png")
     side_icon = find_asset(records, assets, "side stories icon.png") or find_asset(records, assets, "side stories icon")
-    files_icon = find_asset(records, assets, "files icon.png") or find_asset(records, assets, "files icon")
-    mail_icon = find_asset(records, assets, "mail icon.png") or find_asset(records, assets, "mail icon")
+    side_icon_focused = find_asset(records, assets, "side stories icon highlight.png")
+    files_icon = find_asset(records, assets, "files icon_0.png") or find_asset(records, assets, "files icon.png")
+    files_icon_focused = find_asset(records, assets, "file icons highlight.png")
+    mail_icon = find_asset(records, assets, "mail icon_0.png") or find_asset(records, assets, "mail icon.png")
+    mail_icon_focused = find_asset(records, assets, "mail icon highlight.png")
     photos_icon = find_asset(records, assets, "photos icon.png") or find_asset(records, assets, "photos icon")
-    music_icon = find_asset(records, assets, "music icon.png") or find_asset(records, assets, "music icon")
-    settings_icon = find_asset(records, assets, "settings icon.png") or find_asset(records, assets, "settings icon")
+    photos_icon_focused = find_asset(records, assets, "photo icon highlight.png")
+    music_icon = find_asset(records, assets, "music icon_0.png") or find_asset(records, assets, "music icon.png")
+    music_icon_focused = find_asset(records, assets, "music icon highlight.png")
+    settings_icon = find_asset(records, assets, "settings icon_0.png") or find_asset(records, assets, "settings icon.png")
+    settings_icon_focused = find_asset(records, assets, "settings icon highlight.png")
     if font is None:
         font = next((a for a in assets if a["kind"] == "font"), None)
     menu_entries = [
@@ -115,41 +124,92 @@ def build(source: Path, output: Path, limit: int, max_bytes: int) -> dict:
     ]
     boot = {
         "schema": "keygen.scene.v1", "title": "DDLC Plus Launcher", "design_width": 1920,
-        "design_height": 1080, "clear": [0, 0, 0, 255],
+        "design_height": 1080, "borderless": True,
+        # Rendering remains the recovered 1920x1080; the macOS host discovers
+        # the active display's point size and letterboxes instead of cropping.
+        "fit_window_to_display": True, "immersive_system_ui": True,
+        "clear": [0, 0, 0, 255],
         "font_path": f"../{font['logical_path']}" if font else "",
-        "layers": [], "particle_insertions": [], "menu_insertion": 2,
+        "layers": [], "particle_insertions": [], "menu_insertion": 11,
         # The Unity launcher uses a 436x633 lower-left panel.  Its eight
         # 436x73 rows are laid out from the panel's top edge in reference
         # coordinates; keeping those coordinates here makes the native
         # compositor match the recovered prefab instead of a generic menu.
-        "menu": {"x": 116.0, "y": 505.0, "width": 310.0, "row_height": 52.0,
-        "spacing": 21.0, "font_size": 32.0, "outline_width": 1,
-        "color": [123, 0, 102, 255], "outline": [255, 255, 255, 0],
-        "focused_outline": [229, 20, 135, 255], "entries": menu_entries},
+        "menu": {"x": 116.0, "y": 457.0, "width": 300.0, "row_height": 73.0,
+        "spacing": 0.0, "font_size": 32.0, "outline_width": 1,
+        "color": [123, 0, 102, 255], "focused_color": [255, 255, 255, 255],
+        "outline": [255, 255, 255, 0],
+        "focused_outline": [255, 255, 255, 0], "entries": menu_entries},
         "text_layers": [], "particles": None, "fade": None,
     }
     if wallpaper:
         boot["layers"].append({"id": "launcher-wallpaper", "path": f"../{wallpaper['logical_path']}",
                                 "x": 960.0, "y": 540.0, "scale": 1.0, "anchor": "center",
-                                "alpha": 1.0, "entrance": None, "motion": None})
+                                "alpha": 1.0, "entrance": None, "motion": None,
+                                "source_rect": None, "visible_when_focused": None})
+    if drop_shadow:
+        boot["layers"].append({"id": "start-menu-shadow", "path": f"../{drop_shadow['logical_path']}",
+                                "x": -30.0, "y": 437.0, "scale": 1.0, "anchor": "top_left",
+                                "alpha": 1.0, "entrance": None, "motion": None,
+                                "source_rect": [27, 27, 456, 456], "visible_when_focused": None,
+                                "nine_slice": {"left": 37, "top": 37, "right": 35, "bottom": 35,
+                                               "width": 496.0, "height": 673.0}})
     if start_panel:
         boot["layers"].append({"id": "start-menu-panel", "path": f"../{start_panel['logical_path']}",
                                 "x": 218.0, "y": 763.5, "scale": 0.5, "anchor": "center",
-                                "alpha": 1.0, "entrance": None, "motion": None})
+                                "alpha": 1.0, "entrance": None, "motion": None,
+                                "source_rect": None, "visible_when_focused": None})
+    if launcher_atlas:
+        # Unity's source rect is bottom-origin. The compositor's PNG crop is
+        # top-origin, hence 4096 - (1503 + 145) = 2448.
+        for index in range(8):
+            boot["layers"].append({"id": f"row-highlight-{index}",
+                                    "path": f"../{launcher_atlas['logical_path']}",
+                                    "x": 0.0, "y": 457.0 + index * 73.0, "scale": 0.50115,
+                                    "anchor": "top_left", "alpha": 1.0,
+                                    "entrance": None, "motion": None,
+                                    "source_rect": [0, 2448, 870, 145],
+                                    "visible_when_focused": index})
     # These source sprites are 85px UI icons and are displayed at native
     # launcher scale, one per visible application row.  The panel already
     # supplies the pink/cream surface behind them.
-    for asset, ident, y in ((ddlc_icon, "ddlc-icon", 484.0),
-                            (side_icon, "side-icon", 557.0),
-                            (files_icon, "files-icon", 630.0),
-                            (mail_icon, "mail-icon", 703.0),
-                            (photos_icon, "photos-icon", 776.0),
-                            (music_icon, "music-icon", 849.0),
-                            (settings_icon, "settings-icon", 922.0)):
+    icons = ((ddlc_icon, ddlc_icon_focused, "ddlc-icon", 0),
+             (side_icon, side_icon_focused, "side-icon", 1),
+             (files_icon, files_icon_focused, "files-icon", 2),
+             (mail_icon, mail_icon_focused, "mail-icon", 3),
+             (photos_icon, photos_icon_focused, "photos-icon", 4),
+             (music_icon, music_icon_focused, "music-icon", 5),
+             (settings_icon, settings_icon_focused, "settings-icon", 6))
+    for asset, focused_asset, ident, index in icons:
+        y = 493.5 + index * 73.0
         if asset:
             boot["layers"].append({"id": ident, "path": f"../{asset['logical_path']}",
-                                    "x": 72.0, "y": y, "scale": 0.5, "anchor": "center",
-                                    "alpha": 1.0, "entrance": None, "motion": None})
+                                    "x": 36.0, "y": y, "scale": 0.5, "anchor": "center",
+                                    "alpha": 1.0, "entrance": None, "motion": None,
+                                    "source_rect": None, "visible_when_focused": None})
+        if focused_asset:
+            boot["layers"].append({"id": f"{ident}-focused", "path": f"../{focused_asset['logical_path']}",
+                                    "x": 36.0, "y": y, "scale": 0.5, "anchor": "center",
+                                    "alpha": 1.0, "entrance": None, "motion": None,
+                                    "source_rect": None, "visible_when_focused": index})
+    # Desktop taskbar is an atlas crop in the same recovered UI texture.
+    if launcher_atlas:
+        boot["layers"].append({"id": "taskbar", "path": f"../{launcher_atlas['logical_path']}",
+                                "x": 0.0, "y": 1020.0, "scale": 1.0, "anchor": "top_left",
+                                "alpha": 1.0, "entrance": None, "motion": None,
+                                "source_rect": [0, 2235, 1920, 60], "visible_when_focused": None})
+    for asset, ident, x, y, scale in ((heart_glow, "start-heart-glow", 75.5, 1050.0, 0.5),
+                                      (heart_icon, "start-heart", 75.5, 1050.0, 0.5)):
+        if asset:
+            boot["layers"].append({"id": ident, "path": f"../{asset['logical_path']}",
+                                    "x": x, "y": y, "scale": scale, "anchor": "center",
+                                    "alpha": 1.0, "entrance": None, "motion": None,
+                                    "source_rect": None, "visible_when_focused": None})
+    boot["text_layers"].append({"id": "launcher-clock", "text": "14:08", "x": 1614.0,
+        "y": 1032.0, "font_size": 30.0, "color": [255, 255, 255, 255],
+        "outline": [0, 0, 0, 0], "outline_width": 0, "visible_at": 0.0,
+        "characters_per_second": None, "system_clock_24h": True,
+        "font_path": f"../{desktop_font['logical_path']}" if desktop_font else None})
     (scenes_dir / "boot.json").write_text(json.dumps(boot, indent=2, sort_keys=True) + "\n")
     for name in sorted(grouped):
         category_scene = dict(boot)
@@ -159,14 +219,14 @@ def build(source: Path, output: Path, limit: int, max_bytes: int) -> dict:
         category_scene["text_layers"] = [{"id": "category-status", "text": f"KEYGEN / {name.upper()}",
             "x": 64.0, "y": 64.0, "font_size": 32.0, "color": [220, 230, 245, 255],
             "outline": [0, 0, 0, 255], "outline_width": 1, "visible_at": 0.0,
-            "characters_per_second": None}]
+            "characters_per_second": None, "system_clock_24h": False, "font_path": None}]
         (scenes_dir / f"{name}.json").write_text(json.dumps(category_scene, indent=2, sort_keys=True) + "\n")
     text_paths = [source / r["source_path"] for r in records if r["kind"] == "text"]
     story = output / "story.json"
     subprocess.run([sys.executable, str(IMPORT), *map(str, text_paths), "--output", str(story), "--limit", str(limit)], cwd=ROOT, check=True)
     labels = ["start"] + [f"category.{name}" for name in sorted(grouped)]
     scenes = [{"id":f"scene.{name}","asset_ids":ids} for name,ids in sorted(grouped.items())]
-    routes = [{"id":f"route.{name}","scene":f"scene.{name}","story_entry":f"category.{name}"} for name in sorted(grouped)]
+    routes = [{"id":f"route.{name}","scene":f"scene.{name}","story_entry":None} for name in sorted(grouped)]
     # Preserve the recovered launcher semantics when the corresponding
     # categories exist, while retaining every generated category route.
     aliases = {
@@ -180,8 +240,8 @@ def build(source: Path, output: Path, limit: int, max_bytes: int) -> dict:
     }
     for route_id, category_name in aliases.items():
         if category_name in grouped:
-            routes.append({"id": route_id, "scene": f"scene.{category_name}", "story_entry": f"category.{category_name}"})
-    project = {"schema":"keygen.project.v1", "project":{"id":"keygen.private.full-content", "display_name":"KeyGen private content package", "version":"0.1.0"}, "viewport":{"width":1920,"height":1080}, "assets":assets, "scenes":scenes, "routes":routes, "story":{"entry":"start","labels":labels}, "persistence":{"namespace":"keygen.private.full-content","schema":"keygen.project.state.v1"}}
+            routes.append({"id": route_id, "scene": f"scene.{category_name}", "story_entry": None})
+    project = {"schema":"keygen.project.v1", "project":{"id":"kg-ddlc-plus.private", "display_name":"KG DDLC Plus", "version":"0.1.0"}, "viewport":{"width":1920,"height":1080}, "assets":assets, "scenes":scenes, "routes":routes, "story":{"entry":"start","labels":labels}, "persistence":{"namespace":"kg-ddlc-plus.private","schema":"keygen.project.state.v1"}}
     (output / "project.json").write_text(json.dumps(project, indent=2, sort_keys=True) + "\n")
     routes = {"schema":"keygen.launcher.routes.v1", "entry":"scene.text", "routes":[{"id":f"route.{name}","scene":f"scene.{name}","asset_count":len(ids)} for name,ids in sorted(grouped.items())], "story":"story.json"}
     (output / "routes.json").write_text(json.dumps(routes, indent=2, sort_keys=True) + "\n")

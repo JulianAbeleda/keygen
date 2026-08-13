@@ -619,6 +619,12 @@ pub fn map_pointer(
     window: (usize, usize),
     design: (usize, usize),
 ) -> (f32, f32) {
+    // Window backends can briefly report a zero-sized drawable while a resize
+    // or display transition is in flight. Keep input finite and deterministic
+    // during that interval instead of producing NaNs from a zero scale.
+    if window.0 == 0 || window.1 == 0 || design.0 == 0 || design.1 == 0 {
+        return (0.0, 0.0);
+    }
     let scale = (window.0 as f32 / design.0 as f32).min(window.1 as f32 / design.1 as f32);
     let offset_x = (window.0 as f32 - design.0 as f32 * scale) * 0.5;
     let offset_y = (window.1 as f32 - design.1 as f32 * scale) * 0.5;
@@ -626,6 +632,64 @@ pub fn map_pointer(
         (pointer.0 - offset_x) / scale,
         (pointer.1 - offset_y) / scale,
     )
+}
+
+/// Native window defaults shared by all packaged scenes. The drawable keeps
+/// the design viewport's aspect ratio while remaining freely resizable; the
+/// minifb backend then letterboxes the unused axis. Keeping this policy in the
+/// host adapter prevents individual scenes from accidentally choosing a
+/// different stretch mode.
+pub fn window_options(borderless: bool) -> minifb::WindowOptions {
+    minifb::WindowOptions {
+        borderless,
+        title: !borderless,
+        resize: !borderless,
+        scale: minifb::Scale::X1,
+        scale_mode: minifb::ScaleMode::AspectRatioStretch,
+        ..minifb::WindowOptions::default()
+    }
+}
+
+/// Ask AppKit for the active display's logical point size without linking the
+/// deterministic engine to platform APIs. JXA is a system-provided, bounded
+/// host adapter; it emits exactly `width,height` or fails closed.
+#[cfg(target_os = "macos")]
+pub fn active_display_size() -> Result<Option<(usize, usize)>, String> {
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-l",
+            "JavaScript",
+            "-e",
+            "ObjC.import('AppKit'); const f=$.NSScreen.mainScreen.frame; String(Number(f.size.width)+','+Number(f.size.height))",
+        ])
+        .output()
+        .map_err(|error| format!("cannot query active macOS display: {error}"))?;
+    if !output.status.success() {
+        return Err("cannot query active macOS display".into());
+    }
+    let value = String::from_utf8(output.stdout)
+        .map_err(|_| "active macOS display query returned invalid UTF-8")?;
+    let (width, height) = value
+        .trim()
+        .split_once(',')
+        .ok_or("active macOS display query returned invalid geometry")?;
+    let size = (
+        width
+            .parse::<usize>()
+            .map_err(|_| "active macOS display query returned invalid width")?,
+        height
+            .parse::<usize>()
+            .map_err(|_| "active macOS display query returned invalid height")?,
+    );
+    if size.0 == 0 || size.1 == 0 {
+        return Err("active macOS display query returned empty geometry".into());
+    }
+    Ok(Some(size))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn active_display_size() -> Result<Option<(usize, usize)>, String> {
+    Ok(None)
 }
 
 pub fn key_event(frame: u64, key: Key, down: bool, repeat: bool) -> InputEvent {
@@ -673,6 +737,35 @@ mod tests {
         let (x, y) = map_pointer((800.0, 450.0), (1600, 900), (1280, 720));
         assert!((x - 640.0).abs() < 0.01);
         assert!((y - 360.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn pointer_mapping_handles_zero_drawable_during_resize() {
+        assert_eq!(map_pointer((12.0, 8.0), (0, 0), (1280, 720)), (0.0, 0.0));
+        assert_eq!(map_pointer((12.0, 8.0), (1280, 720), (0, 0)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn window_policy_is_explicit_for_immersive_and_windowed_modes() {
+        let immersive = window_options(true);
+        assert!(immersive.borderless);
+        assert!(!immersive.title);
+        assert!(!immersive.resize);
+        assert!(matches!(immersive.scale, minifb::Scale::X1));
+        assert_eq!(immersive.scale_mode, minifb::ScaleMode::AspectRatioStretch);
+
+        let windowed = window_options(false);
+        assert!(!windowed.borderless);
+        assert!(windowed.title);
+        assert!(windowed.resize);
+        assert!(matches!(windowed.scale, minifb::Scale::X1));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn active_display_query_returns_positive_logical_geometry() {
+        let size = active_display_size().unwrap().unwrap();
+        assert!(size.0 > 0 && size.1 > 0);
     }
 
     #[test]

@@ -51,6 +51,11 @@ fn minimal_scene() -> SceneSpec {
         title: "test".into(),
         design_width: 1,
         design_height: 1,
+        borderless: false,
+        window_width: None,
+        window_height: None,
+        fit_window_to_display: false,
+        immersive_system_ui: false,
         clear: Color([0, 0, 0, 255]),
         font_path: "font.ttf".into(),
         layers: vec![ImageLayerSpec {
@@ -63,6 +68,9 @@ fn minimal_scene() -> SceneSpec {
             alpha: 1.0,
             entrance: None,
             motion: None,
+            source_rect: None,
+            visible_when_focused: None,
+            nine_slice: None,
         }],
         particle_insertions: vec![],
         menu_insertion: None,
@@ -75,6 +83,7 @@ fn minimal_scene() -> SceneSpec {
             font_size: 1.0,
             outline_width: 0,
             color: Color([255; 4]),
+            focused_color: None,
             outline: Color([0, 0, 0, 255]),
             focused_outline: Color([0, 0, 0, 255]),
             entries: vec![MenuEntrySpec {
@@ -110,6 +119,8 @@ fn invalid_text_timing_fails_closed() {
         outline_width: 0,
         visible_at: -1.0,
         characters_per_second: None,
+        system_clock_24h: false,
+        font_path: None,
     });
     assert!(scene.validate().is_err());
 }
@@ -128,5 +139,50 @@ fn schema_rejection_fails_closed() {
 fn invalid_non_finite_geometry_fails_closed() {
     let mut scene = minimal_scene();
     scene.layers[0].x = f32::NAN;
+    assert!(scene.validate().is_err());
+}
+
+#[test]
+fn json_rejects_empty_atlas_rect() {
+    let json = br#"{
+        "schema":"keygen.scene.v1","title":"atlas","design_width":1,"design_height":1,
+        "clear":[0,0,0,255],"font_path":"font.ttf",
+        "layers":[{"id":"image","path":"image.png","x":0,"y":0,"scale":1,
+        "anchor":"top_left","alpha":1,"entrance":null,"motion":null,"source_rect":[0,0,0,4]}],
+        "particle_insertions":[],"menu_insertion":null,"menu":null,"text_layers":[],
+        "particles":null,"fade":null
+    }"#;
+    assert!(SceneSpec::from_json(json).is_err());
+}
+
+#[test]
+fn invalid_nine_slice_geometry_fails_closed() {
+    let mut scene = minimal_scene();
+    scene.layers[0].source_rect = Some([0, 0, 8, 8]);
+    scene.layers[0].nine_slice = Some(keygen_engine::model::NineSliceSpec {
+        left: 4,
+        top: 1,
+        right: 4,
+        bottom: 1,
+        width: 16.0,
+        height: 16.0,
+    });
+    assert!(scene.validate().is_err());
+}
+
+#[test]
+fn borderless_and_focused_fill_fields_are_backward_compatible() {
+    let mut scene = minimal_scene();
+    scene.borderless = true;
+    scene.menu.as_mut().unwrap().focused_color = Some(Color([8, 7, 6, 255]));
+    assert!(scene.validate().is_ok());
+}
+
+#[test]
+fn display_fit_and_fixed_window_geometry_are_mutually_exclusive() {
+    let mut scene = minimal_scene();
+    scene.fit_window_to_display = true;
+    scene.window_width = Some(1280);
+    scene.window_height = Some(720);
     assert!(scene.validate().is_err());
 }

@@ -201,7 +201,11 @@ impl Unlocks {
 mod tests {
     use super::*;
     fn store() -> (AtomicStore, PathBuf) {
-        let root = std::env::temp_dir().join(format!("keygen-store-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "keygen-store-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
         let _ = fs::remove_dir_all(&root);
         (AtomicStore::new(root.clone()), root)
     }

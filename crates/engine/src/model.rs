@@ -9,6 +9,24 @@ pub struct SceneSpec {
     pub title: String,
     pub design_width: u32,
     pub design_height: u32,
+    /// Host-window policy remains declarative so packaged products can choose
+    /// immersive borderless presentation without title-specific host code.
+    #[serde(default)]
+    pub borderless: bool,
+    /// Target host window size. Omit to use the design surface size. This is
+    /// intentionally independent from the deterministic render resolution.
+    #[serde(default)]
+    pub window_width: Option<u32>,
+    #[serde(default)]
+    pub window_height: Option<u32>,
+    /// Size the native host window to the active display. This keeps package
+    /// data portable across macOS display modes while the design surface and
+    /// aspect-preserving compositor remain deterministic.
+    #[serde(default)]
+    pub fit_window_to_display: bool,
+    /// Ask a packaged macOS host to suppress system UI while active.
+    #[serde(default)]
+    pub immersive_system_ui: bool,
     pub clear: Color,
     pub font_path: String,
     pub layers: Vec<ImageLayerSpec>,
@@ -47,6 +65,25 @@ pub struct ImageLayerSpec {
     pub alpha: f32,
     pub entrance: Option<EntranceSpec>,
     pub motion: Option<MotionSpec>,
+    /// Optional atlas crop in source pixels: x, y, width, height.
+    #[serde(default)]
+    pub source_rect: Option<[u32; 4]>,
+    /// If present, draw this layer only while the given menu index is focused.
+    #[serde(default)]
+    pub visible_when_focused: Option<usize>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSliceSpec>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NineSliceSpec {
+    pub left: u32,
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -95,6 +132,9 @@ pub struct MenuSpec {
     pub font_size: f32,
     pub outline_width: u8,
     pub color: Color,
+    /// Optional focused fill color. Older scenes retain their normal fill.
+    #[serde(default)]
+    pub focused_color: Option<Color>,
     pub outline: Color,
     pub focused_outline: Color,
     pub entries: Vec<MenuEntrySpec>,
@@ -123,6 +163,15 @@ pub struct TextLayerSpec {
     #[serde(default)]
     pub visible_at: f32,
     pub characters_per_second: Option<f32>,
+    /// Host-provided wall clock, formatted as 24-hour hours and minutes.
+    /// The deterministic compositor keeps the declared fallback string when
+    /// no host value has been projected into the scene.
+    #[serde(default)]
+    pub system_clock_24h: bool,
+    /// Optional font override for this text layer. The host resolves the path
+    /// and provides its bytes; the compositor stays file-system independent.
+    #[serde(default)]
+    pub font_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -179,6 +228,17 @@ impl SceneSpec {
         if self.design_width == 0 || self.design_height == 0 {
             return Err("scene design size must be positive".into());
         }
+        if self.fit_window_to_display
+            && (self.window_width.is_some() || self.window_height.is_some())
+            || self.window_width.is_some() != self.window_height.is_some()
+            || self.window_width.is_some_and(|width| width == 0)
+            || self.window_height.is_some_and(|height| height == 0)
+        {
+            return Err(
+                "scene window size must be either display-fit or a positive width/height pair"
+                    .into(),
+            );
+        }
         let pixels = u64::from(self.design_width) * u64::from(self.design_height);
         if pixels > 16_777_216 {
             return Err("scene design surface is too large".into());
@@ -197,6 +257,29 @@ impl SceneSpec {
                 || !finite(&[layer.x, layer.y, layer.scale, layer.alpha])
             {
                 return Err("layer id, path, geometry, scale, or alpha is invalid".into());
+            }
+            if let Some(rect) = layer.source_rect {
+                if rect[2] == 0 || rect[3] == 0 {
+                    return Err(format!("layer {} has an empty source rectangle", layer.id));
+                }
+            }
+            if let Some(slice) = layer.nine_slice {
+                if slice.width <= 0.0
+                    || slice.height <= 0.0
+                    || !finite(&[slice.width, slice.height])
+                    || slice.left == 0 && slice.right == 0 && slice.top == 0 && slice.bottom == 0
+                    || layer.source_rect.is_some_and(|source| {
+                        slice.left.saturating_add(slice.right) >= source[2]
+                            || slice.top.saturating_add(slice.bottom) >= source[3]
+                    })
+                    || slice.width < slice.left.saturating_add(slice.right) as f32
+                    || slice.height < slice.top.saturating_add(slice.bottom) as f32
+                {
+                    return Err(format!(
+                        "layer {} has invalid nine-slice geometry",
+                        layer.id
+                    ));
+                }
             }
             if let Some(entrance) = &layer.entrance {
                 let scale_delay = entrance.scale_delay.unwrap_or(entrance.delay);
@@ -259,6 +342,10 @@ impl SceneSpec {
         }
         for text in &self.text_layers {
             if text.id.trim().is_empty()
+                || text
+                    .font_path
+                    .as_deref()
+                    .is_some_and(|path| path.trim().is_empty())
                 || text.font_size <= 0.0
                 || text.visible_at < 0.0
                 || text

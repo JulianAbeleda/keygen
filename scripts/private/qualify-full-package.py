@@ -34,15 +34,15 @@ def main() -> int:
     run(["cargo", "run", "-q", "-p", "keygen", "--", "validate", str(project)])
     run(["cargo", "run", "-q", "-p", "keygen", "--", "story", str(project)])
     trace = run(["cargo", "run", "-q", "-p", "keygen", "--", "trace", str(project)])
-    for marker in ("trace: Launcher", "trace: Story", "trace: story", "trace: Closed"):
+    for marker in ("trace: Launcher", "trace: App", "trace: Closed"):
         if marker not in trace:
             raise ValueError(f"missing qualification trace marker: {marker}")
     run(["cargo", "run", "-q", "-p", "keygen", "--", "render", str(project), "--scene", str(out / "scenes/boot.json"), "--output", str(out / "boot.png"), "--time", "0"])
     if os.uname().sysname == "Darwin" and os.uname().machine == "arm64":
         run(["cargo", "build", "-q", "-p", "keygen", "--release"])
         dist = out / "dist"
-        run(["scripts/package-keygen-macos.sh", "--binary", "target/release/keygen", "--target", "keygen", "--display-name", "KeyGen", "--bundle-id", "com.julian.keygen", "--resources", str(out), "--out", str(dist)])
-        run(["scripts/smoke-keygen-app.sh", str(dist / "keygen.app"), "keygen", "com.julian.keygen"])
+        run(["scripts/package-keygen-macos.sh", "--binary", "target/release/keygen", "--target", "kg_ddlc_plus", "--display-name", "KG DDLC Plus", "--bundle-id", "com.julian.kg-ddlc-plus", "--resources", str(out), "--out", str(dist)])
+        run(["scripts/smoke-keygen-app.sh", str(dist / "kg_ddlc_plus.app"), "kg_ddlc_plus", "com.julian.kg-ddlc-plus"])
     print(json.dumps({"status": "passed", "package": str(out), "boot": str(out / "boot.png")}))
     return 0
 
