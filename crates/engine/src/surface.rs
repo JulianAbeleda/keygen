@@ -57,14 +57,19 @@ impl Surface {
             return;
         }
         let offset = ((y as u32 * self.width + x as u32) * 4) as usize;
-        let alpha = (f32::from(color[3]) / 255.0 * opacity.clamp(0.0, 1.0)).clamp(0.0, 1.0);
-        let inverse = 1.0 - alpha;
+        let source_alpha = (f32::from(color[3]) / 255.0 * opacity.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let destination_alpha = f32::from(self.pixels[offset + 3]) / 255.0;
+        let output_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
         for (index, channel) in color[..3].iter().enumerate() {
-            self.pixels[offset + index] = (f32::from(*channel) * alpha
-                + f32::from(self.pixels[offset + index]) * inverse)
-                .round() as u8;
+            let premultiplied = f32::from(*channel) * source_alpha
+                + f32::from(self.pixels[offset + index]) * destination_alpha * (1.0 - source_alpha);
+            self.pixels[offset + index] = if output_alpha > 0.0 {
+                (premultiplied / output_alpha).round() as u8
+            } else {
+                0
+            };
         }
-        self.pixels[offset + 3] = 255;
+        self.pixels[offset + 3] = (output_alpha * 255.0).round() as u8;
     }
 
     pub fn fill(&mut self, color: [u8; 4], opacity: f32) {
@@ -424,9 +429,7 @@ impl Canvas {
         top: i32,
         clip: [f32; 4],
     ) -> bool {
-        if source.pixels.chunks_exact(4).any(|pixel| pixel[3] != 255) {
-            return false;
-        }
+        let opaque = source.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255);
         let s = self.density;
         let clip_left = (clip[0] * s).floor() as i32;
         let clip_top = (clip[1] * s).floor() as i32;
@@ -444,7 +447,21 @@ impl Canvas {
                 }
                 let si = ((sy as u32 * source.width + sx as u32) * 4) as usize;
                 let di = ((dy as u32 * self.surface.width + dx as u32) * 4) as usize;
-                self.surface.pixels[di..di + 4].copy_from_slice(&source.pixels[si..si + 4]);
+                if opaque {
+                    self.surface.pixels[di..di + 4].copy_from_slice(&source.pixels[si..si + 4]);
+                } else {
+                    self.surface.blend(
+                        dx,
+                        dy,
+                        [
+                            source.pixels[si],
+                            source.pixels[si + 1],
+                            source.pixels[si + 2],
+                            source.pixels[si + 3],
+                        ],
+                        1.0,
+                    );
+                }
             }
         }
         true
@@ -539,9 +556,24 @@ impl Canvas {
         self.rounded_shape([x, y, w, h], radius, color, false, 0.0);
     }
 
-    /// Draws an antialiased rounded outline. The stroke is centered on the
-    /// supplied rectangle and is clipped to the canvas.
+    /// Draws an antialiased rounded outline inside the supplied rectangle so
+    /// its complete requested width remains visible at a clipping boundary.
     pub fn rounded_stroke(&mut self, rect: [f32; 4], radius: f32, width: f32, color: [u8; 4]) {
+        if width > 0.0 {
+            self.rounded_shape(rect, radius, color, true, width);
+        }
+    }
+
+    /// Draws a CSS-style rounded border entirely inside the supplied bounds.
+    /// Unlike a centered path stroke, the visible border retains its complete
+    /// requested width when the rectangle itself is the clipping boundary.
+    pub fn rounded_stroke_inside(
+        &mut self,
+        rect: [f32; 4],
+        radius: f32,
+        width: f32,
+        color: [u8; 4],
+    ) {
         if width > 0.0 {
             self.rounded_shape(rect, radius, color, true, width);
         }
@@ -609,9 +641,14 @@ impl Canvas {
         radius: f32,
         color: [u8; 4],
         stroke: bool,
-        width: f32,
+        inner_inset: f32,
     ) {
-        if w <= 0.0 || h <= 0.0 || ![x, y, w, h, radius, width].iter().all(|v| v.is_finite()) {
+        if w <= 0.0
+            || h <= 0.0
+            || ![x, y, w, h, radius, inner_inset]
+                .iter()
+                .all(|v| v.is_finite())
+        {
             return;
         }
         let s = self.density;
@@ -620,7 +657,7 @@ impl Canvas {
         let w = w * s;
         let h = h * s;
         let r = radius.max(0.0).min(w.min(h) / 2.0);
-        let half = (width * s / 2.0).max(0.0);
+        let half = (inner_inset * s).max(0.0);
         let min_x = x.floor().max(0.0) as i32;
         let min_y = y.floor().max(0.0) as i32;
         let max_x = (x + w).ceil().min(self.surface.width as f32) as i32;
@@ -631,32 +668,12 @@ impl Canvas {
                 let center_y = py as f32 + 0.5;
                 let outer_band = (center_x >= x + r && center_x < x + w - r)
                     || (center_y >= y + r && center_y < y + h - r);
-                let inner_x = x + half;
-                let inner_y = y + half;
-                let inner_w = (w - 2.0 * half).max(0.0);
-                let inner_h = (h - 2.0 * half).max(0.0);
-                let inner_r = (r - half).max(0.0);
-                let inner_band = (center_x >= inner_x + inner_r
-                    && center_x < inner_x + inner_w - inner_r)
-                    || (center_y >= inner_y + inner_r && center_y < inner_y + inner_h - inner_r);
-                if outer_band && (!stroke || !inner_band) {
+                if !stroke && outer_band {
                     self.surface.blend(px, py, color, 1.0);
                     continue;
                 }
-                if stroke && outer_band && inner_band {
-                    continue;
-                }
                 let outer_center = rounded_distance(center_x, center_y, x, y, w, h, r) <= -0.75;
-                let inner_center = rounded_distance(
-                    center_x,
-                    center_y,
-                    x + half,
-                    y + half,
-                    (w - 2.0 * half).max(0.0),
-                    (h - 2.0 * half).max(0.0),
-                    (r - half).max(0.0),
-                ) <= -0.75;
-                if outer_center && (!stroke || !inner_center) {
+                if !stroke && outer_center {
                     self.surface.blend(px, py, color, 1.0);
                     continue;
                 }
@@ -1529,6 +1546,29 @@ mod tests {
         assert_eq!(canvas.surface().pixels, replay.surface().pixels);
         let translucent = Surface::new(1, 1, [9, 8, 7, 128]);
         assert!(!canvas.blit_surface(&translucent, 0, 0));
+    }
+
+    #[test]
+    fn clipped_surface_composites_transparency_over_the_destination() {
+        let mut source = Surface::new(2, 1, [0, 0, 0, 0]);
+        source.pixels[4..8].copy_from_slice(&[200, 100, 0, 128]);
+        let mut canvas = Canvas::new(3, 1, [20, 40, 80, 255]);
+        assert!(canvas.blit_surface_clipped(&source, 1, 0, [0.0, 0.0, 3.0, 1.0]));
+        assert_eq!(&canvas.surface().pixels[4..8], [20, 40, 80, 255]);
+        assert_eq!(&canvas.surface().pixels[8..12], [110, 70, 40, 255]);
+    }
+
+    #[test]
+    fn inside_rounded_stroke_retains_the_requested_cardinal_width() {
+        let mut canvas = Canvas::new(20, 14, [0, 0, 0, 255]);
+        canvas.rounded_stroke_inside([2.0, 2.0, 16.0, 10.0], 3.0, 2.0, [255, 0, 0, 255]);
+        let red = |x: usize, y: usize| canvas.surface().pixels[(y * 20 + x) * 4];
+        assert_eq!(red(8, 2), 255);
+        assert_eq!(red(8, 3), 255);
+        assert_eq!(red(8, 4), 0);
+        assert_eq!(red(2, 7), 255);
+        assert_eq!(red(3, 7), 255);
+        assert_eq!(red(4, 7), 0);
     }
 
     #[test]
