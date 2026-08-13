@@ -65,6 +65,106 @@ pub trait PresentationBackend {
     fn lifecycle_state(&self) -> LifecycleState;
 }
 
+/// The platform capability selected by the host.  This is deliberately a
+/// value, rather than a compile-time assumption, so the same runtime can be
+/// qualified headlessly in CI and launched natively on Apple Silicon.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MacOsBackendKind {
+    /// Existing software window backend. It is the portable fallback used by
+    /// the current player executable.
+    Minifb,
+    /// Reserved for the AppKit/Metal adapter. Keeping this explicit prevents
+    /// the fallback from being mistaken for a native renderer.
+    AppKitMetal,
+}
+
+/// Safe macOS launch adapter. It describes a bundle launch without invoking
+/// shell commands or linking Cocoa. The eventual AppKit host can consume the
+/// same argv/environment contract, while tests can validate it on any host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MacOsLaunchAdapter {
+    pub bundle: std::path::PathBuf,
+    pub backend: MacOsBackendKind,
+}
+
+impl MacOsLaunchAdapter {
+    pub fn new(bundle: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            bundle: bundle.into(),
+            backend: MacOsBackendKind::Minifb,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let name = self
+            .bundle
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !name.ends_with(".app") {
+            return Err(format!(
+                "macOS launch target must be an .app bundle: {}",
+                self.bundle.display()
+            ));
+        }
+        let executable = self.bundle.join("Contents/MacOS");
+        if !executable.is_dir() {
+            return Err(format!(
+                "macOS bundle is missing Contents/MacOS: {}",
+                self.bundle.display()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the executable path for an external launcher or test harness.
+    /// No process is started here; ownership of process lifecycle stays with
+    /// the application host.
+    pub fn executable(&self) -> Result<std::path::PathBuf, String> {
+        self.validate()?;
+        let mut entries = std::fs::read_dir(self.bundle.join("Contents/MacOS"))
+            .map_err(|e| format!("cannot inspect macOS executable directory: {e}"))?;
+        entries
+            .find_map(|entry| entry.ok().map(|e| e.path()))
+            .ok_or_else(|| "macOS bundle has no executable in Contents/MacOS".into())
+    }
+}
+
+/// A concrete, safe presentation backend used by native-host qualification.
+/// It accepts frames and lifecycle events exactly as an AppKit/Metal backend
+/// would, but retains the latest frame in memory. This makes host integration
+/// testable without unsafe FFI while the actual renderer remains minifb.
+#[derive(Clone, Debug, Default)]
+pub struct MacOsQualificationBackend {
+    state: LifecycleState,
+    latest: Option<HostFrame>,
+}
+
+impl MacOsQualificationBackend {
+    pub fn latest_frame(&self) -> Option<&HostFrame> {
+        self.latest.as_ref()
+    }
+}
+
+impl PresentationBackend for MacOsQualificationBackend {
+    fn present(&mut self, frame: HostFrame) -> Result<(), String> {
+        if !self.state.accepts_frame() {
+            return Err("macOS backend is not presenting".into());
+        }
+        self.latest = Some(frame);
+        Ok(())
+    }
+
+    fn lifecycle(&mut self, event: LifecycleEvent) -> Result<(), String> {
+        self.state.apply(event);
+        Ok(())
+    }
+
+    fn lifecycle_state(&self) -> LifecycleState {
+        self.state
+    }
+}
+
 /// Generic launch identity passed from a bundle or an embedding host.  The
 /// engine never infers a product name or a product-specific route from argv.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -462,5 +562,25 @@ mod tests {
         assert_eq!(host.request_quit(), Ok(QuitDecision::Quit));
         assert_eq!(host.state(), LifecycleState::Terminating);
         assert!(host.save.flushed);
+    }
+
+    #[test]
+    fn qualification_backend_retains_latest_frame_and_closes() {
+        let viewport = DesignViewport::new(1, 1);
+        let mut backend = MacOsQualificationBackend::default();
+        backend
+            .present(HostFrame::new(viewport, 9, vec![1, 2, 3, 4]).unwrap())
+            .unwrap();
+        assert_eq!(backend.latest_frame().map(|frame| frame.frame), Some(9));
+        backend.lifecycle(LifecycleEvent::Closed).unwrap();
+        assert!(backend
+            .present(HostFrame::new(viewport, 10, vec![0; 4]).unwrap())
+            .is_err());
+    }
+
+    #[test]
+    fn launch_adapter_rejects_non_app_bundle() {
+        let adapter = MacOsLaunchAdapter::new("/tmp/keygen");
+        assert!(adapter.validate().is_err());
     }
 }

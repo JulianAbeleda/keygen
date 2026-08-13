@@ -17,6 +17,7 @@ EXTENSIONS = {
     ".wav": "audio", ".ogg": "audio", ".mp3": "audio", ".m4a": "audio",
     ".ttf": "font", ".otf": "font", ".txt": "text", ".json": "text",
     ".csv": "text", ".xml": "text", ".asset": "text", ".prefab": "text",
+    ".unity": "text", ".scene": "text",
 }
 
 def sha256(path: Path) -> tuple[str, int]:
