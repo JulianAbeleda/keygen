@@ -673,17 +673,16 @@ where
         }
         if matches!(wrap, Wrap::Word) {
             if let Some(space) = last_space.filter(|s| *s >= line_start) {
-                let move_count = out.len() - space - 1;
                 line += 1;
                 let mut next_x = 0.0;
-                for glyph in &mut out[space + 1..] {
+                let mut moved = out.split_off(space + 1);
+                for glyph in &mut moved {
                     glyph.line = line;
                     glyph.x = next_x;
                     glyph.y = line as f32 * line_height;
                     next_x += advance(glyph.character).max(0.0);
                 }
-                out.truncate(space + 1);
-                let _ = move_count;
+                out.append(&mut moved);
                 line_start = out.len();
                 last_space = None;
                 x = next_x;
@@ -939,6 +938,19 @@ mod tests {
         assert!(glyphs.iter().any(|g| g.character == '日'));
         assert!(glyphs.iter().any(|g| g.character == 'x' && g.line >= 1));
         assert!(glyphs.iter().all(|g| g.x >= 0.0 && g.y >= 0.0));
+    }
+
+    #[test]
+    fn measured_layout_preserves_every_non_newline_character_when_wrapping() {
+        for text in ["one two three", "abcdef", "日本語 テスト", "one\ntwo three"] {
+            let glyphs = layout_text_measured(text, 4.0, 2.0, Align::Left, Wrap::Word, |_| 1.0);
+            let reconstructed: String = glyphs.iter().map(|g| g.character).collect();
+            let expected: String = text.chars().filter(|c| *c != '\n').collect();
+            assert_eq!(reconstructed, expected, "text={text:?}");
+            assert!(glyphs
+                .windows(2)
+                .all(|pair| { pair[1].line > pair[0].line || pair[1].x >= pair[0].x }));
+        }
     }
     #[test]
     fn clock_is_fixed_and_focus_is_semantic() {

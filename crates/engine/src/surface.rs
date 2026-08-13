@@ -411,6 +411,43 @@ impl Canvas {
         }
         true
     }
+
+    /// Copies an opaque cached region at a logical offset while applying a
+    /// logical rectangular clip. This is the minimal masked composition
+    /// primitive needed for bounded history scrollback and never paints
+    /// outside the clip or destination.
+    pub fn blit_surface_clipped(
+        &mut self,
+        source: &Surface,
+        left: i32,
+        top: i32,
+        clip: [f32; 4],
+    ) -> bool {
+        if source.pixels.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+            return false;
+        }
+        let s = self.density;
+        let clip_left = (clip[0] * s).floor() as i32;
+        let clip_top = (clip[1] * s).floor() as i32;
+        let clip_right = ((clip[0] + clip[2]) * s).ceil() as i32;
+        let clip_bottom = ((clip[1] + clip[3]) * s).ceil() as i32;
+        for sy in 0..source.height as i32 {
+            let dy = top + sy;
+            if dy < clip_top || dy >= clip_bottom || dy < 0 || dy >= self.surface.height as i32 {
+                continue;
+            }
+            for sx in 0..source.width as i32 {
+                let dx = left + sx;
+                if dx < clip_left || dx >= clip_right || dx < 0 || dx >= self.surface.width as i32 {
+                    continue;
+                }
+                let si = ((sy as u32 * source.width + sx as u32) * 4) as usize;
+                let di = ((dy as u32 * self.surface.width + dx as u32) * 4) as usize;
+                self.surface.pixels[di..di + 4].copy_from_slice(&source.pixels[si..si + 4]);
+            }
+        }
+        true
+    }
     pub fn fill_rect(&mut self, rect: [f32; 4], color: [u8; 4]) {
         self.rect(rect, color, None);
     }
@@ -936,6 +973,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn clipped_surface_composition_never_paints_outside_clip() {
+        let source = Surface::new(4, 4, [255, 0, 0, 255]);
+        let mut canvas = Canvas::new_scaled(8, 8, 2.0, [0, 0, 0, 255]);
+        assert!(canvas.blit_surface_clipped(&source, 2, 2, [1.0, 1.0, 2.0, 2.0]));
+        for y in 0..16 {
+            for x in 0..16 {
+                let i = (y * 16 + x) * 4;
+                let inside = (2..6).contains(&x) && (2..6).contains(&y);
+                assert_eq!(canvas.surface().pixels[i] > 0, inside);
+            }
+        }
+    }
+
+    #[test]
+    fn representative_dialogue_material_is_bounded() {
+        let started = std::time::Instant::now();
+        let mut canvas = Canvas::new_scaled(828, 648, 2.0, [10, 10, 20, 255]);
+        canvas.rounded_rect_aa([0.0, 0.0, 828.0, 648.0], 18.0, [20, 30, 50, 240]);
+        canvas.rounded_stroke([0.0, 0.0, 828.0, 648.0], 18.0, 1.0, [40, 220, 255, 200]);
+        canvas.linear_gradient(
+            [0.0, 0.0, 828.0, 648.0],
+            [10, 10, 20, 80],
+            [120, 20, 80, 80],
+        );
+        canvas.blur_region([0.0, 0.0, 828.0, 648.0], 4);
+        let elapsed = started.elapsed();
+        eprintln!("representative 828x648@2x material: {elapsed:?}");
+        // Debug builds remain useful for correctness but are not the shipped
+        // performance target; the release qualification is recorded in the
+        // CF-010 report.
+        assert!(elapsed.as_secs_f64() < 10.0);
     }
 
     #[test]
