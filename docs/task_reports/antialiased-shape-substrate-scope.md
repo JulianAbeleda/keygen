@@ -223,6 +223,30 @@ diagonals—without requiring card-specific PNGs or CSS.
 
 ## Scope boundaries
 
+### KGR-006 host/backing-scale audit (2026-08-13)
+
+The player host was audited separately from the rasterizer. `WindowPolicy`
+dimensions are logical points; `pixel_density` is the explicit logical-to-
+backing conversion used to size the CPU canvas and the minifb upload. The
+conversion is now exposed as a checked `physical_size()` helper and validated
+before opening a window, with headless tests covering the 2x Retina case and
+overflow rejection. The native adapter continues to report `Minifb` and does
+not claim an AppKit/Metal renderer. Its backend-neutral `HostFrame` contract
+already validates exact RGBA payload size, while `map_pointer` preserves
+aspect-ratio letterboxing and remains display-independent.
+
+The headless host now also exposes `render_frame_scaled`, which accepts logical
+dimensions, an explicit density, view/frame ID, and caller-supplied time, then
+returns a physical-resolution `Surface`. The existing `render_frame` delegates
+to this API at density 1; invalid densities and integer-size overflow fail
+closed without touching a display.
+
+No generic evidence justified changing minifb's presentation mode: it receives
+the completed CPU bitmap, not shape geometry, and its scale mode is already
+explicit (`X1` plus aspect-ratio stretch). A live Retina backing conversion
+cannot be obtained portably from minifb; a future AppKit host should replace
+the manual density policy with the window's backing-coordinate conversion.
+
 ### In scope
 
 - antialiased filled polygons in `keygen-engine`;

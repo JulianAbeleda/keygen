@@ -18,4 +18,4 @@ pub mod scene;
 
 pub use compositor::{ease, entrance_settled, Scene, SceneAssets};
 pub use surface::Surface;
-pub use surface::{Canvas, FontFace, ImageFit};
+pub use surface::{AntialiasMode, Canvas, FillOptions, FillRule, FontFace, ImageFit};

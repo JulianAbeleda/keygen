@@ -60,6 +60,22 @@ pub struct WindowPolicy {
     pub title: String,
 }
 
+impl WindowPolicy {
+    /// Return drawable backing dimensions for this logical window.
+    pub fn physical_size(&self) -> Result<(usize, usize), String> {
+        let density = usize::from(self.pixel_density);
+        let width = self
+            .width
+            .checked_mul(density)
+            .ok_or_else(|| "window backing width overflows usize".to_owned())?;
+        let height = self
+            .height
+            .checked_mul(density)
+            .ok_or_else(|| "window backing height overflows usize".to_owned())?;
+        Ok((width, height))
+    }
+}
+
 impl Default for WindowPolicy {
     fn default() -> Self {
         Self {
@@ -83,6 +99,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     if !(1..=240).contains(&policy.target_fps) {
         return Err("window target_fps must be between 1 and 240".into());
     }
+    policy.physical_size()?;
     let mut options = WindowOptions {
         resize: policy.resizable,
         ..WindowOptions::default()
@@ -180,15 +197,100 @@ pub fn render_frame<A: Application>(
     elapsed: Duration,
     frame: u64,
 ) -> Surface {
-    let mut canvas = Canvas::new(width as u32, height as u32, [0, 0, 0, 255]);
+    render_frame_scaled(app, width, height, 1, frame, elapsed.as_millis() as u64)
+        .expect("density 1 headless render cannot fail")
+}
+
+/// Render a logical frame into a physical-resolution backing surface without
+/// opening a window. `view` is the deterministic frame/view identifier and
+/// `now_ms` is supplied by the caller so captures do not read a clock.
+pub fn render_frame_scaled<A: Application>(
+    app: &mut A,
+    logical_width: usize,
+    logical_height: usize,
+    pixel_density: u8,
+    view: u64,
+    now_ms: u64,
+) -> Result<Surface, String> {
+    if !(1..=4).contains(&pixel_density) {
+        return Err("headless pixel_density must be between 1 and 4".into());
+    }
+    let density = usize::from(pixel_density);
+    let width = logical_width
+        .checked_mul(density)
+        .ok_or_else(|| "headless backing width overflows usize".to_owned())?;
+    let height = logical_height
+        .checked_mul(density)
+        .ok_or_else(|| "headless backing height overflows usize".to_owned())?;
+    let width_u32 =
+        u32::try_from(width).map_err(|_| "headless backing width exceeds u32".to_owned())?;
+    let height_u32 =
+        u32::try_from(height).map_err(|_| "headless backing height exceeds u32".to_owned())?;
+    let logical_width_u32 =
+        u32::try_from(logical_width).map_err(|_| "logical width exceeds u32".to_owned())?;
+    let logical_height_u32 =
+        u32::try_from(logical_height).map_err(|_| "logical height exceeds u32".to_owned())?;
+    debug_assert_eq!(width_u32, logical_width_u32 * u32::from(pixel_density));
+    debug_assert_eq!(height_u32, logical_height_u32 * u32::from(pixel_density));
+    let mut canvas = Canvas::new_scaled(
+        logical_width_u32,
+        logical_height_u32,
+        f32::from(pixel_density),
+        [0, 0, 0, 255],
+    );
     app.frame(
         &mut canvas,
         HostContext {
-            elapsed,
-            frame,
-            width,
-            height,
+            elapsed: Duration::from_millis(now_ms),
+            frame: view,
+            width: logical_width,
+            height: logical_height,
         },
     );
-    canvas.into_surface()
+    Ok(canvas.into_surface())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SolidApp;
+    impl Application for SolidApp {
+        fn frame(&mut self, canvas: &mut Canvas, _context: HostContext) {
+            canvas.clear([255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn scaled_headless_render_uses_physical_dimensions() {
+        let surface = render_frame_scaled(&mut SolidApp, 3, 2, 2, 7, 125).unwrap();
+        assert_eq!((surface.width, surface.height), (6, 4));
+    }
+
+    #[test]
+    fn scaled_headless_render_rejects_invalid_density() {
+        assert!(render_frame_scaled(&mut SolidApp, 3, 2, 0, 0, 0).is_err());
+        assert!(render_frame_scaled(&mut SolidApp, 3, 2, 5, 0, 0).is_err());
+    }
+
+    #[test]
+    fn policy_maps_logical_window_to_backing_pixels() {
+        let policy = WindowPolicy {
+            width: 1600,
+            height: 900,
+            pixel_density: 2,
+            ..WindowPolicy::default()
+        };
+        assert_eq!(policy.physical_size().unwrap(), (3200, 1800));
+    }
+
+    #[test]
+    fn policy_rejects_backing_dimension_overflow() {
+        let policy = WindowPolicy {
+            width: usize::MAX,
+            pixel_density: 2,
+            ..WindowPolicy::default()
+        };
+        assert!(policy.physical_size().is_err());
+    }
 }

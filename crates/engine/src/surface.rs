@@ -8,6 +8,37 @@ pub struct Surface {
     pub pixels: Vec<u8>,
 }
 
+/// Rule used to decide whether a point is inside a self-intersecting path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillRule {
+    EvenOdd,
+    Winding,
+}
+
+/// Coverage policy for filled shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AntialiasMode {
+    /// Four-by-four fixed samples per pixel.
+    Coverage,
+    /// One sample at the pixel centre.
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FillOptions {
+    pub rule: FillRule,
+    pub antialias: AntialiasMode,
+}
+
+impl Default for FillOptions {
+    fn default() -> Self {
+        Self {
+            rule: FillRule::EvenOdd,
+            antialias: AntialiasMode::Coverage,
+        }
+    }
+}
+
 impl Surface {
     pub fn new(width: u32, height: u32, color: [u8; 4]) -> Self {
         let mut pixels = vec![0; width as usize * height as usize * 4];
@@ -188,6 +219,28 @@ impl Surface {
     }
 }
 
+fn inside_polygon(points: &[[f32; 2]], px: f32, py: f32, rule: FillRule) -> bool {
+    let mut winding = 0i32;
+    let mut parity = false;
+    let mut j = points.len() - 1;
+    for i in 0..points.len() {
+        let (xi, yi) = (points[i][0], points[i][1]);
+        let (xj, yj) = (points[j][0], points[j][1]);
+        if (yi > py) != (yj > py) {
+            let cross = (xj - xi) * (py - yi) / (yj - yi) + xi;
+            if px < cross {
+                parity = !parity;
+                winding += if yj > yi { 1 } else { -1 };
+            }
+        }
+        j = i;
+    }
+    match rule {
+        FillRule::EvenOdd => parity,
+        FillRule::Winding => winding != 0,
+    }
+}
+
 /// How an image is fitted into a destination rectangle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFit {
@@ -359,6 +412,16 @@ impl Canvas {
         }
     }
     pub fn polygon(&mut self, points: &[[f32; 2]], color: [u8; 4]) {
+        self.polygon_with_options(points, color, FillOptions::default());
+    }
+
+    /// Fills a polygon using a clipped, deterministic coverage mask.
+    pub fn polygon_with_options(
+        &mut self,
+        points: &[[f32; 2]],
+        color: [u8; 4],
+        options: FillOptions,
+    ) {
         if points.len() < 3 {
             return;
         }
@@ -366,6 +429,12 @@ impl Canvas {
             .iter()
             .map(|point| [point[0] * self.density, point[1] * self.density])
             .collect::<Vec<_>>();
+        if points
+            .iter()
+            .any(|p| !p[0].is_finite() || !p[1].is_finite())
+        {
+            return;
+        }
         let min_x = points
             .iter()
             .map(|p| p[0])
@@ -391,20 +460,69 @@ impl Canvas {
             .ceil()
             .min(self.surface.height as f32) as i32;
         for y in min_y..max_y {
-            for x in min_x..max_x {
-                let mut hit = false;
-                let mut j = points.len() - 1;
-                for i in 0..points.len() {
-                    let (xi, yi) = (points[i][0], points[i][1]);
-                    let (xj, yj) = (points[j][0], points[j][1]);
-                    if ((yi > y as f32) != (yj > y as f32))
-                        && ((x as f32) < (xj - xi) * (y as f32 - yi) / (yj - yi) + xi)
-                    {
-                        hit = !hit;
+            if options.antialias == AntialiasMode::Coverage {
+                let mut coverage = vec![0u8; (max_x - min_x) as usize];
+                for sy in 0..4 {
+                    let scan_y = y as f32 + (sy as f32 + 0.5) / 4.0;
+                    let mut crossings = Vec::with_capacity(points.len());
+                    let mut j = points.len() - 1;
+                    for i in 0..points.len() {
+                        let (xi, yi) = (points[i][0], points[i][1]);
+                        let (xj, yj) = (points[j][0], points[j][1]);
+                        if (yi > scan_y) != (yj > scan_y) {
+                            let x = xi + (scan_y - yi) * (xj - xi) / (yj - yi);
+                            crossings.push((x, if yj > yi { 1i32 } else { -1i32 }));
+                        }
+                        j = i;
                     }
-                    j = i;
+                    crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    let mut intervals = Vec::new();
+                    match options.rule {
+                        FillRule::EvenOdd => {
+                            for pair in crossings.chunks_exact(2) {
+                                intervals.push((pair[0].0, pair[1].0));
+                            }
+                        }
+                        FillRule::Winding => {
+                            let mut winding = 0;
+                            let mut start = 0.0;
+                            for (x, delta) in crossings {
+                                let old = winding;
+                                winding += delta;
+                                if old == 0 && winding != 0 {
+                                    start = x;
+                                }
+                                if old != 0 && winding == 0 {
+                                    intervals.push((start, x));
+                                }
+                            }
+                        }
+                    }
+                    for (left, right) in intervals {
+                        let first = left.floor() as i32;
+                        let last = right.ceil() as i32;
+                        for px in first.max(min_x)..last.min(max_x) {
+                            let mut hits = 0;
+                            for sx in 0..4 {
+                                let sample_x = px as f32 + (sx as f32 + 0.5) / 4.0;
+                                if sample_x >= left && sample_x < right {
+                                    hits += 1;
+                                }
+                            }
+                            coverage[(px - min_x) as usize] += hits;
+                        }
+                    }
                 }
-                if hit {
+                for (index, hits) in coverage.into_iter().enumerate() {
+                    if hits != 0 {
+                        self.surface
+                            .blend(min_x + index as i32, y, color, hits as f32 / 16.0);
+                    }
+                }
+                continue;
+            }
+            for x in min_x..max_x {
+                if inside_polygon(&points, x as f32 + 0.5, y as f32 + 0.5, options.rule) {
                     self.surface.blend(x, y, color, 1.0);
                 }
             }
@@ -625,5 +743,160 @@ mod tests {
         let second = canvas.encode_png().expect("png");
         assert_eq!(first, second);
         assert!(first.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn polygon_coverage_has_fractional_diagonal_and_is_replayable() {
+        let points = [[0.2, 0.2], [6.7, 1.1], [1.0, 6.8]];
+        let mut a = Canvas::new(8, 8, [0, 0, 0, 255]);
+        a.polygon(&points, [255, 255, 255, 128]);
+        let mut b = Canvas::new(8, 8, [0, 0, 0, 255]);
+        b.polygon(&points, [255, 255, 255, 128]);
+        assert_eq!(a.surface().pixels, b.surface().pixels);
+        assert!(a
+            .surface()
+            .pixels
+            .chunks_exact(4)
+            .any(|p| p[0] > 0 && p[0] < 128));
+    }
+
+    #[test]
+    fn polygon_rejects_nonfinite_and_degenerate_input() {
+        let mut canvas = Canvas::new(4, 4, [3, 4, 5, 255]);
+        canvas.polygon(&[[0.0, 0.0], [f32::NAN, 1.0], [2.0, 2.0]], [255, 0, 0, 255]);
+        canvas.polygon_with_options(
+            &[[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]],
+            [255, 0, 0, 255],
+            FillOptions {
+                rule: FillRule::Winding,
+                antialias: AntialiasMode::None,
+            },
+        );
+        assert!(canvas
+            .surface()
+            .pixels
+            .chunks_exact(4)
+            .all(|p| p == [3, 4, 5, 255]));
+    }
+
+    #[test]
+    fn polygon_coverage_classifies_far_interior_and_exterior_exactly() {
+        let mut canvas = Canvas::new(12, 12, [7, 8, 9, 255]);
+        canvas.polygon(
+            &[[1.0, 1.0], [11.0, 1.0], [11.0, 11.0], [1.0, 11.0]],
+            [200, 0, 0, 255],
+        );
+        let pixel = |x: usize, y: usize| &canvas.surface().pixels[(y * 12 + x) * 4..][..4];
+        assert_eq!(pixel(6, 6), [200, 0, 0, 255]);
+        assert_eq!(pixel(0, 0), [7, 8, 9, 255]);
+    }
+
+    #[test]
+    fn polygon_even_odd_is_vertex_order_invariant_for_concave_shapes() {
+        let points = [
+            [1.2, 1.2],
+            [9.4, 1.2],
+            [9.4, 4.3],
+            [5.1, 4.3],
+            [5.1, 9.1],
+            [1.2, 9.1],
+        ];
+        let mut reversed = points;
+        reversed.reverse();
+        let mut forward = Canvas::new(12, 12, [10, 20, 30, 255]);
+        let mut backward = Canvas::new(12, 12, [10, 20, 30, 255]);
+        forward.polygon(&points, [240, 230, 220, 255]);
+        backward.polygon(&reversed, [240, 230, 220, 255]);
+        assert_eq!(forward.surface().pixels, backward.surface().pixels);
+    }
+
+    #[test]
+    fn polygon_fill_rules_distinguish_a_twice_traced_shape() {
+        let twice_traced = [
+            [1.0, 1.0],
+            [7.0, 1.0],
+            [7.0, 7.0],
+            [1.0, 7.0],
+            [1.0, 1.0],
+            [7.0, 1.0],
+            [7.0, 7.0],
+            [1.0, 7.0],
+        ];
+        let mut even_odd = Canvas::new(9, 9, [0, 0, 0, 255]);
+        let mut winding = Canvas::new(9, 9, [0, 0, 0, 255]);
+        even_odd.polygon_with_options(&twice_traced, [255, 255, 255, 255], FillOptions::default());
+        winding.polygon_with_options(
+            &twice_traced,
+            [255, 255, 255, 255],
+            FillOptions {
+                rule: FillRule::Winding,
+                ..FillOptions::default()
+            },
+        );
+        let center = (4 * 9 + 4) * 4;
+        assert_eq!(
+            &even_odd.surface().pixels[center..center + 4],
+            [0, 0, 0, 255]
+        );
+        assert_eq!(
+            &winding.surface().pixels[center..center + 4],
+            [255, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn polygon_binary_mode_has_no_fractional_pixels() {
+        let mut canvas = Canvas::new(8, 8, [0, 0, 0, 255]);
+        canvas.polygon_with_options(
+            &[[0.2, 0.2], [6.7, 1.1], [1.0, 6.8]],
+            [255, 255, 255, 255],
+            FillOptions {
+                antialias: AntialiasMode::None,
+                ..FillOptions::default()
+            },
+        );
+        assert!(canvas
+            .surface()
+            .pixels
+            .chunks_exact(4)
+            .all(|pixel| pixel[0] == 0 || pixel[0] == 255));
+    }
+
+    #[test]
+    fn polygon_density_changes_detail_not_logical_bounds() {
+        let points = [[1.25, 1.25], [6.75, 1.25], [6.75, 6.75], [1.25, 6.75]];
+        let mut one = Canvas::new_scaled(8, 8, 1.0, [0, 0, 0, 255]);
+        let mut two = Canvas::new_scaled(8, 8, 2.0, [0, 0, 0, 255]);
+        one.polygon(&points, [255, 255, 255, 255]);
+        two.polygon(&points, [255, 255, 255, 255]);
+        assert_eq!((one.width(), one.height()), (two.width(), two.height()));
+        assert_eq!((one.surface().width, one.surface().height), (8, 8));
+        assert_eq!((two.surface().width, two.surface().height), (16, 16));
+        assert_eq!(&two.surface().pixels[..4], [0, 0, 0, 255]);
+        let interior = ((8 * 16 + 8) * 4) as usize;
+        assert_eq!(
+            &two.surface().pixels[interior..interior + 4],
+            [255, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    #[ignore = "release timing evidence; run with --ignored --release"]
+    fn polygon_game_term_release_timing_evidence() {
+        let mut canvas = Canvas::new_scaled(1600, 900, 2.0, [0, 0, 0, 255]);
+        let polygon = [
+            [80.0, 80.0],
+            [1520.0, 110.0],
+            [1450.0, 820.0],
+            [100.0, 780.0],
+        ];
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            canvas.polygon(&polygon, [255, 255, 255, 255]);
+        }
+        eprintln!(
+            "10 representative 1600x900@2x polygon draws: {:?}",
+            start.elapsed()
+        );
     }
 }
