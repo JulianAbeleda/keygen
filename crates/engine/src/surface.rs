@@ -253,11 +253,12 @@ fn rounded_distance(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, radius: f3
     if w <= 0.0 || h <= 0.0 {
         return 1.0;
     }
-    let cx = (x + radius).max(x).min(x + w - radius);
-    let cy = (y + radius).max(y).min(y + h - radius);
-    let dx = (px - cx).abs() - radius;
-    let dy = (py - cy).abs() - radius;
-    dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0)
+    let radius = radius.max(0.0).min(w.min(h) / 2.0);
+    let half_width = w / 2.0;
+    let half_height = h / 2.0;
+    let dx = (px - (x + half_width)).abs() - (half_width - radius);
+    let dy = (py - (y + half_height)).abs() - (half_height - radius);
+    dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
 }
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
@@ -1008,6 +1009,26 @@ mod tests {
             .pixels
             .chunks_exact(4)
             .any(|p| p[0] > 0 && p[0] < 255));
+    }
+
+    #[test]
+    fn rounded_rectangle_corners_are_symmetric_and_bounded() {
+        let mut canvas = Canvas::new(40, 30, [0, 0, 0, 255]);
+        canvas.rounded_rect_aa([4.0, 3.0, 30.0, 20.0], 6.0, [255, 255, 255, 255]);
+        let red = |x: usize, y: usize| canvas.surface().pixels[(y * 40 + x) * 4];
+        for y in 3..23 {
+            for x in 4..34 {
+                assert_eq!(red(x, y), red(37 - x, y), "horizontal symmetry at {x},{y}");
+                assert_eq!(red(x, y), red(x, 25 - y), "vertical symmetry at {x},{y}");
+            }
+        }
+        assert_eq!(red(4, 3), 0);
+        assert_eq!(red(33, 3), 0);
+        assert_eq!(red(4, 22), 0);
+        assert_eq!(red(33, 22), 0);
+        assert_eq!(red(10, 3), 255);
+        assert_eq!(red(4, 9), 255);
+        assert_eq!(red(20, 12), 255);
     }
 
     #[test]
