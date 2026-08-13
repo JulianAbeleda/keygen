@@ -6,9 +6,13 @@
 //! changing the engine or story state.
 
 use keygen_engine::input::{Device, InputEvent, InputEventKind, Key, PointerButton};
-use std::process::Child;
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Child,
+};
 
 pub const SUPPORTED_OS: &str = "macOS";
 pub const SUPPORTED_ARCH: &str = "arm64";
@@ -295,6 +299,111 @@ pub enum AudioCommand {
 
 pub trait AudioBackend {
     fn submit(&mut self, command: AudioCommand) -> Result<(), String>;
+}
+
+/// System audio adapter for macOS. `afplay` is a shipped macOS client of the
+/// CoreAudio stack, so this keeps the player free of a second decoder or an
+/// unsafe FFI layer while still sending real audio to the system device.
+/// Clips are resolved by the package boundary; the engine only deals in
+/// logical clip IDs.
+#[derive(Debug, Default)]
+pub struct MacOsSystemAudioBackend {
+    clips: BTreeMap<String, PathBuf>,
+    players: BTreeMap<String, Child>,
+}
+
+impl MacOsSystemAudioBackend {
+    pub fn new<I, K, P>(clips: I) -> Self
+    where
+        I: IntoIterator<Item = (K, P)>,
+        K: Into<String>,
+        P: Into<PathBuf>,
+    {
+        Self {
+            clips: clips
+                .into_iter()
+                .map(|(k, p)| (k.into(), p.into()))
+                .collect(),
+            players: BTreeMap::new(),
+        }
+    }
+
+    pub fn registered_clip(&self, id: &str) -> Option<&Path> {
+        self.clips.get(id).map(PathBuf::as_path)
+    }
+
+    pub fn stop_all(&mut self) {
+        for (_, mut player) in std::mem::take(&mut self.players) {
+            let _ = player.kill();
+        }
+    }
+}
+
+impl Drop for MacOsSystemAudioBackend {
+    fn drop(&mut self) {
+        self.stop_all();
+    }
+}
+
+impl AudioBackend for MacOsSystemAudioBackend {
+    fn submit(&mut self, command: AudioCommand) -> Result<(), String> {
+        match command {
+            AudioCommand::Stop { channel } => {
+                if let Some(mut player) = self.players.remove(&channel) {
+                    let _ = player.kill();
+                }
+                Ok(())
+            }
+            AudioCommand::SetVolume { .. } => {
+                Err("macOS afplay adapter does not support per-channel volume; use the engine mix before submission".into())
+            }
+            AudioCommand::Play { channel, clip, looped } => {
+                let path = self
+                    .clips
+                    .get(&clip)
+                    .ok_or_else(|| format!("audio clip is not registered: {clip}"))?;
+                if !path.is_file() {
+                    return Err(format!("audio clip does not exist: {}", path.display()));
+                }
+                if let Some(mut player) = self.players.remove(&channel) {
+                    let _ = player.kill();
+                }
+                if !cfg!(target_os = "macos") {
+                    return Err("CoreAudio playback requires macOS".into());
+                }
+                let mut command = std::process::Command::new("afplay");
+                if looped {
+                    command.arg("-R");
+                }
+                let player = command
+                    .arg(path)
+                    .spawn()
+                    .map_err(|error| format!("cannot start CoreAudio afplay adapter: {error}"))?;
+                self.players.insert(channel, player);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Capabilities are reported rather than inferred from the fallback window.
+/// This prevents a software Cocoa window from being mistaken for a Metal
+/// renderer by packaging and qualification tools.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeHostCapabilities {
+    pub appkit_window: bool,
+    pub metal_renderer: bool,
+    pub core_audio: bool,
+    pub text_input: bool,
+}
+
+pub const fn native_capabilities() -> NativeHostCapabilities {
+    NativeHostCapabilities {
+        appkit_window: cfg!(target_os = "macos"),
+        metal_renderer: false,
+        core_audio: cfg!(target_os = "macos"),
+        text_input: false,
+    }
 }
 
 /// The host boundary is intentionally explicit: this product is qualified only
@@ -620,6 +729,43 @@ mod tests {
     #[test]
     fn compiled_backend_is_explicitly_the_native_window_fallback() {
         assert_eq!(MacOsBackendKind::compiled(), MacOsBackendKind::Minifb);
+    }
+
+    #[test]
+    fn native_capabilities_do_not_claim_unimplemented_metal_or_text_input() {
+        let capabilities = native_capabilities();
+        assert!(!capabilities.metal_renderer);
+        assert!(!capabilities.text_input);
+    }
+
+    #[test]
+    fn system_audio_requires_registered_existing_clip() {
+        let mut audio = MacOsSystemAudioBackend::new([("theme", "/definitely/missing/theme.wav")]);
+        assert!(audio
+            .submit(AudioCommand::Play {
+                channel: "music".into(),
+                clip: "unknown".into(),
+                looped: false,
+            })
+            .is_err());
+        assert!(audio
+            .submit(AudioCommand::Play {
+                channel: "music".into(),
+                clip: "theme".into(),
+                looped: false,
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn system_audio_stop_is_idempotent() {
+        let mut audio = MacOsSystemAudioBackend::default();
+        audio
+            .submit(AudioCommand::Stop {
+                channel: "music".into(),
+            })
+            .unwrap();
+        audio.stop_all();
     }
 
     #[cfg(not(target_os = "macos"))]
