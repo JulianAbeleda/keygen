@@ -531,21 +531,23 @@ impl Canvas {
                 let dx = left + sx;
                 let si = ((sy as u32 * source.width + sx as u32) * 4) as usize;
                 let di = ((dy as u32 * self.surface.width + dx as u32) * 4) as usize;
-                if source.pixels[si + 3] == 255 {
-                    self.surface.pixels[di..di + 4].copy_from_slice(&source.pixels[si..si + 4]);
-                } else if source.pixels[si + 3] != 0 {
-                    self.surface.blend(
-                        dx,
-                        dy,
-                        [
-                            source.pixels[si],
-                            source.pixels[si + 1],
-                            source.pixels[si + 2],
-                            source.pixels[si + 3],
-                        ],
-                        1.0,
-                    );
+                let alpha = source.pixels[si + 3];
+                if alpha == 0 {
+                    continue;
                 }
+                if alpha == 255 {
+                    self.surface.pixels[di..di + 4].copy_from_slice(&source.pixels[si..si + 4]);
+                    continue;
+                }
+                let inverse = 255_u32 - u32::from(alpha);
+                for channel in 0..3 {
+                    self.surface.pixels[di + channel] = ((u32::from(source.pixels[si + channel])
+                        * u32::from(alpha)
+                        + u32::from(self.surface.pixels[di + channel]) * inverse
+                        + 127)
+                        / 255) as u8;
+                }
+                self.surface.pixels[di + 3] = 255;
             }
         }
         true
