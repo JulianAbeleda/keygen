@@ -1,6 +1,6 @@
 //! Generic native application host. Product crates provide only state and drawing.
 use keygen_engine::{Canvas, Surface};
-use minifb::{InputCallback, Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
+use minifb::{InputCallback, Key, MouseButton, MouseMode, Window, WindowOptions};
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -137,8 +137,10 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let mut window = Window::new(&policy.title, policy.width, policy.height, options)
         .map_err(|e| e.to_string())?;
     window.set_target_fps(policy.target_fps);
-    let text = Rc::new(RefCell::new(Vec::new()));
-    window.set_input_callback(Box::new(TextCollector { text: text.clone() }));
+    let pending_input = Rc::new(RefCell::new(PendingInput::default()));
+    window.set_input_callback(Box::new(InputCollector {
+        pending: pending_input.clone(),
+    }));
     let started = Instant::now();
     let mut previous = started;
     let mut frame = 0;
@@ -164,20 +166,18 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
         // macOS may deliver committed text and Return during the same host
         // frame. Apply the text callback first so Return submits the complete
         // Composer value instead of observing the previous frame's text.
-        let committed_text = text.borrow_mut().drain(..).collect::<Vec<_>>();
-        let pressed_keys = window
-            .get_keys_pressed(KeyRepeat::Yes)
+        let (committed_text, native_keys) = {
+            let mut pending = pending_input.borrow_mut();
+            (
+                pending.text.drain(..).collect::<Vec<_>>(),
+                pending.keys.drain(..).collect::<Vec<_>>(),
+            )
+        };
+        let key_events = native_keys
             .into_iter()
-            .map(|key| (key, modifiers(&window)))
+            .map(|(key, pressed)| (key, pressed, modifiers(&window)))
             .collect::<Vec<_>>();
-        dispatch_frame_input(&mut app, committed_text, pressed_keys);
-        for key in window.get_keys_released() {
-            app.event(HostEvent::Key {
-                key,
-                pressed: false,
-                modifiers: modifiers(&window),
-            });
-        }
+        dispatch_frame_input(&mut app, committed_text, key_events);
         if let Some((_, vertical)) = window.get_scroll_wheel() {
             if let Some(delta) = normalize_scroll_delta(vertical) {
                 app.event(HostEvent::Scroll { delta });
@@ -246,30 +246,40 @@ fn modifiers(window: &Window) -> Modifiers {
     }
 }
 
-struct TextCollector {
-    text: Rc<RefCell<Vec<u32>>>,
+#[derive(Default)]
+struct PendingInput {
+    text: Vec<u32>,
+    keys: Vec<(Key, bool)>,
 }
 
-impl InputCallback for TextCollector {
+struct InputCollector {
+    pending: Rc<RefCell<PendingInput>>,
+}
+
+impl InputCallback for InputCollector {
     fn add_char(&mut self, codepoint: u32) {
-        self.text.borrow_mut().push(codepoint);
+        self.pending.borrow_mut().text.push(codepoint);
+    }
+
+    fn set_key_state(&mut self, key: Key, state: bool) {
+        self.pending.borrow_mut().keys.push((key, state));
     }
 }
 
 fn dispatch_frame_input<A: Application>(
     app: &mut A,
     text: impl IntoIterator<Item = u32>,
-    keys: impl IntoIterator<Item = (Key, Modifiers)>,
+    keys: impl IntoIterator<Item = (Key, bool, Modifiers)>,
 ) {
     for codepoint in text {
         if let Some(character) = char::from_u32(codepoint) {
             app.event(HostEvent::Text(character));
         }
     }
-    for (key, modifiers) in keys {
+    for (key, pressed, modifiers) in keys {
         app.event(HostEvent::Key {
             key,
-            pressed: true,
+            pressed,
             modifiers,
         });
     }
@@ -362,7 +372,7 @@ mod tests {
         dispatch_frame_input(
             &mut recorder,
             ['O' as u32, 'K' as u32],
-            [(Key::Enter, Modifiers::default())],
+            [(Key::Enter, true, Modifiers::default())],
         );
         assert_eq!(
             recorder.0,
@@ -375,6 +385,20 @@ mod tests {
                     modifiers: Modifiers::default(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn native_key_callback_preserves_press_and_release_events() {
+        let pending = Rc::new(RefCell::new(PendingInput::default()));
+        let mut collector = InputCollector {
+            pending: pending.clone(),
+        };
+        collector.set_key_state(Key::Enter, true);
+        collector.set_key_state(Key::Enter, false);
+        assert_eq!(
+            pending.borrow().keys,
+            [(Key::Enter, true), (Key::Enter, false)]
         );
     }
 
