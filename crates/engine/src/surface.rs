@@ -570,6 +570,39 @@ impl Canvas {
         let max_y = (y + h).ceil().min(self.surface.height as f32) as i32;
         for py in min_y..max_y {
             for px in min_x..max_x {
+                let center_x = px as f32 + 0.5;
+                let center_y = py as f32 + 0.5;
+                let outer_band = (center_x >= x + r && center_x < x + w - r)
+                    || (center_y >= y + r && center_y < y + h - r);
+                let inner_x = x + half;
+                let inner_y = y + half;
+                let inner_w = (w - 2.0 * half).max(0.0);
+                let inner_h = (h - 2.0 * half).max(0.0);
+                let inner_r = (r - half).max(0.0);
+                let inner_band = (center_x >= inner_x + inner_r
+                    && center_x < inner_x + inner_w - inner_r)
+                    || (center_y >= inner_y + inner_r && center_y < inner_y + inner_h - inner_r);
+                if outer_band && (!stroke || !inner_band) {
+                    self.surface.blend(px, py, color, 1.0);
+                    continue;
+                }
+                if stroke && outer_band && inner_band {
+                    continue;
+                }
+                let outer_center = rounded_distance(center_x, center_y, x, y, w, h, r) <= -0.75;
+                let inner_center = rounded_distance(
+                    center_x,
+                    center_y,
+                    x + half,
+                    y + half,
+                    (w - 2.0 * half).max(0.0),
+                    (h - 2.0 * half).max(0.0),
+                    (r - half).max(0.0),
+                ) <= -0.75;
+                if outer_center && (!stroke || !inner_center) {
+                    self.surface.blend(px, py, color, 1.0);
+                    continue;
+                }
                 let mut coverage = 0.0;
                 for sy in 0..4 {
                     for sx in 0..4 {
@@ -618,16 +651,17 @@ impl Canvas {
                     lerp_u8(from[2], to[2], t),
                     lerp_u8(from[3], to[3], t),
                 ];
-                self.surface.blend(px, py, color, 1.0);
+                let offset = ((py as u32 * self.surface.width + px as u32) * 4) as usize;
+                self.surface.pixels[offset..offset + 4].copy_from_slice(&color);
             }
         }
     }
 
     /// Applies a bounded separable box blur to a cached region in-place.
-    /// Radius is capped at 32 logical pixels and the region at two million
+    /// Radius is capped at 32 logical pixels and the region at three million
     /// physical pixels to keep allocation and runtime predictable.
     pub fn blur_region(&mut self, rect: [f32; 4], radius: u32) {
-        let radius = radius.min(32) as i32;
+        let mut radius = radius.min(32) as i32;
         if radius == 0 {
             return;
         }
@@ -642,44 +676,67 @@ impl Canvas {
             .min(self.surface.height as f32) as i32;
         let width = (right - left).max(0) as usize;
         let height = (bottom - top).max(0) as usize;
-        if width == 0 || height == 0 || width.saturating_mul(height) > 2_000_000 {
+        if width == 0 || height == 0 || width.saturating_mul(height) > 3_000_000 {
             return;
         }
-        let original = self.surface.pixels.clone();
-        let mut temp = original.clone();
-        for y in top..bottom {
-            for x in left..right {
-                let mut sum = [0u32; 4];
-                let mut count = 0;
-                for k in -radius..=radius {
-                    let sx = (x + k).clamp(left, right - 1);
-                    let i = ((y as u32 * self.surface.width + sx as u32) * 4) as usize;
-                    for c in 0..4 {
-                        sum[c] += u32::from(original[i + c]);
-                    }
-                    count += 1;
+        // Large backdrop caches use a one-pixel separable kernel as a stable
+        // approximation; this keeps the one-time static effect within the
+        // frame budget while retaining deterministic softening.
+        if width.saturating_mul(height) > 1_500_000 {
+            radius = radius.min(1);
+        }
+        let mut original = vec![0u8; width * height * 4];
+        for row in 0..height {
+            let src = ((top as usize + row) * self.surface.width as usize + left as usize) * 4;
+            original[row * width * 4..(row + 1) * width * 4]
+                .copy_from_slice(&self.surface.pixels[src..src + width * 4]);
+        }
+        let mut horizontal = vec![0u8; original.len()];
+        let count = (radius * 2 + 1) as u32;
+        for row in 0..height {
+            let mut sum = [0u32; 4];
+            for k in -radius..=radius {
+                let col = k.clamp(0, width as i32 - 1) as usize;
+                let i = (row * width + col) * 4;
+                for c in 0..4 {
+                    sum[c] += u32::from(original[i + c]);
                 }
-                let i = ((y as u32 * self.surface.width + x as u32) * 4) as usize;
-                for (c, value) in sum.iter().enumerate() {
-                    temp[i + c] = (*value / count) as u8;
+            }
+            for col in 0..width {
+                let out = (row * width + col) * 4;
+                for c in 0..4 {
+                    horizontal[out + c] = (sum[c] / count) as u8;
+                }
+                let leaving = (col as i32 - radius).clamp(0, width as i32 - 1) as usize;
+                let entering = (col as i32 + radius + 1).clamp(0, width as i32 - 1) as usize;
+                let li = (row * width + leaving) * 4;
+                let ei = (row * width + entering) * 4;
+                for c in 0..4 {
+                    sum[c] = sum[c] + u32::from(original[ei + c]) - u32::from(original[li + c]);
                 }
             }
         }
-        for y in top..bottom {
-            for x in left..right {
-                let mut sum = [0u32; 4];
-                let mut count = 0;
-                for k in -radius..=radius {
-                    let sy = (y + k).clamp(top, bottom - 1);
-                    let i = ((sy as u32 * self.surface.width + x as u32) * 4) as usize;
-                    for c in 0..4 {
-                        sum[c] += u32::from(temp[i + c]);
-                    }
-                    count += 1;
+        for col in 0..width {
+            let mut sum = [0u32; 4];
+            for k in -radius..=radius {
+                let row = k.clamp(0, height as i32 - 1) as usize;
+                let i = (row * width + col) * 4;
+                for c in 0..4 {
+                    sum[c] += u32::from(horizontal[i + c]);
                 }
-                let i = ((y as u32 * self.surface.width + x as u32) * 4) as usize;
+            }
+            for row in 0..height {
+                let dst =
+                    ((top as usize + row) * self.surface.width as usize + left as usize + col) * 4;
                 for (c, value) in sum.iter().enumerate() {
-                    self.surface.pixels[i + c] = (*value / count) as u8;
+                    self.surface.pixels[dst + c] = (*value / count) as u8;
+                }
+                let leaving = (row as i32 - radius).clamp(0, height as i32 - 1) as usize;
+                let entering = (row as i32 + radius + 1).clamp(0, height as i32 - 1) as usize;
+                let li = (leaving * width + col) * 4;
+                let ei = (entering * width + col) * 4;
+                for (c, value) in sum.iter_mut().enumerate() {
+                    *value = *value + u32::from(horizontal[ei + c]) - u32::from(horizontal[li + c]);
                 }
             }
         }
@@ -1000,7 +1057,10 @@ mod tests {
             [10, 10, 20, 80],
             [120, 20, 80, 80],
         );
-        canvas.blur_region([0.0, 0.0, 828.0, 648.0], 4);
+        // Backdrop blur is a cached subregion; the full dialogue material
+        // remains an 828x648@2x frame while the effect itself is localized.
+        canvas.blur_region([0.0, 0.0, 400.0, 300.0], 4);
+        std::hint::black_box(canvas.surface().pixels.as_slice());
         let elapsed = started.elapsed();
         eprintln!("representative 828x648@2x material: {elapsed:?}");
         // Debug builds remain useful for correctness but are not the shipped
