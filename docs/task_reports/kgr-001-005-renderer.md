@@ -37,3 +37,8 @@ The API leaves room to replace the implementation without changing callers.
 Also added `Canvas::blit_surface`, a clipped exact physical-coordinate copy
 for opaque RGBA8 surfaces. It rejects source alpha other than 255 and covers
 clipping, density/backing coordinates, determinism, and alpha rejection.
+
+Added `Canvas::blend_surface` for clipped source-over blending of opaque
+physical surfaces, with opacity-zero no-op and opacity-one exact-blit fast
+paths. Tests cover half-opacity math, clipping, determinism, and alpha
+rejection.

@@ -357,6 +357,43 @@ impl Canvas {
         }
         true
     }
+    /// Blends an opaque source surface at physical backing-pixel coordinates.
+    pub fn blend_surface(&mut self, source: &Surface, left: i32, top: i32, opacity: f32) -> bool {
+        if source.pixels.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+            return false;
+        }
+        if opacity <= 0.0 {
+            return true;
+        }
+        if opacity >= 1.0 {
+            return self.blit_surface(source, left, top);
+        }
+        for sy in 0..source.height as i32 {
+            let dy = top + sy;
+            if dy < 0 || dy >= self.surface.height as i32 {
+                continue;
+            }
+            for sx in 0..source.width as i32 {
+                let dx = left + sx;
+                if dx < 0 || dx >= self.surface.width as i32 {
+                    continue;
+                }
+                let src = ((sy as u32 * source.width + sx as u32) * 4) as usize;
+                self.surface.blend(
+                    dx,
+                    dy,
+                    [
+                        source.pixels[src],
+                        source.pixels[src + 1],
+                        source.pixels[src + 2],
+                        255,
+                    ],
+                    opacity,
+                );
+            }
+        }
+        true
+    }
     pub fn fill_rect(&mut self, rect: [f32; 4], color: [u8; 4]) {
         self.rect(rect, color, None);
     }
@@ -947,5 +984,20 @@ mod tests {
         let mut canvas = Canvas::new_scaled(2, 1, 2.0, [0, 0, 0, 255]);
         assert!(canvas.blit_surface(&source, 2, 1));
         assert_eq!(&canvas.surface().pixels[24..][..4], [9, 8, 7, 255]);
+    }
+
+    #[test]
+    fn surface_blend_is_clipped_deterministic_and_opaque_only() {
+        let source = Surface::new(2, 1, [200, 100, 0, 255]);
+        let mut canvas = Canvas::new(3, 2, [0, 0, 100, 255]);
+        assert!(canvas.blend_surface(&source, -1, 1, 0.5));
+        assert_eq!(&canvas.surface().pixels[12..][..4], [100, 50, 50, 255]);
+        let mut exact = Canvas::new(3, 2, [0, 0, 100, 255]);
+        assert!(exact.blend_surface(&source, 1, 0, 1.0));
+        let mut blit = Canvas::new(3, 2, [0, 0, 100, 255]);
+        assert!(blit.blit_surface(&source, 1, 0));
+        assert_eq!(exact.surface().pixels, blit.surface().pixels);
+        assert!(canvas.blend_surface(&source, 0, 0, 0.0));
+        assert!(!canvas.blend_surface(&Surface::new(1, 1, [1, 2, 3, 128]), 0, 0, 0.5));
     }
 }
