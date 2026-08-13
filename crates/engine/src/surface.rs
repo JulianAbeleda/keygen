@@ -512,27 +512,28 @@ impl Canvas {
         top: i32,
         clip: [f32; 4],
     ) -> bool {
-        let opaque = source.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255);
         let s = self.density;
         let clip_left = (clip[0] * s).floor() as i32;
         let clip_top = (clip[1] * s).floor() as i32;
         let clip_right = ((clip[0] + clip[2]) * s).ceil() as i32;
         let clip_bottom = ((clip[1] + clip[3]) * s).ceil() as i32;
-        for sy in 0..source.height as i32 {
+        let source_left = 0.max(clip_left - left).max(-left);
+        let source_top = 0.max(clip_top - top).max(-top);
+        let source_right = (source.width as i32)
+            .min(clip_right - left)
+            .min(self.surface.width as i32 - left);
+        let source_bottom = (source.height as i32)
+            .min(clip_bottom - top)
+            .min(self.surface.height as i32 - top);
+        for sy in source_top..source_bottom {
             let dy = top + sy;
-            if dy < clip_top || dy >= clip_bottom || dy < 0 || dy >= self.surface.height as i32 {
-                continue;
-            }
-            for sx in 0..source.width as i32 {
+            for sx in source_left..source_right {
                 let dx = left + sx;
-                if dx < clip_left || dx >= clip_right || dx < 0 || dx >= self.surface.width as i32 {
-                    continue;
-                }
                 let si = ((sy as u32 * source.width + sx as u32) * 4) as usize;
                 let di = ((dy as u32 * self.surface.width + dx as u32) * 4) as usize;
-                if opaque {
+                if source.pixels[si + 3] == 255 {
                     self.surface.pixels[di..di + 4].copy_from_slice(&source.pixels[si..si + 4]);
-                } else {
+                } else if source.pixels[si + 3] != 0 {
                     self.surface.blend(
                         dx,
                         dy,
@@ -1656,6 +1657,24 @@ mod tests {
         assert!(canvas.blit_surface_clipped(&source, 1, 0, [0.0, 0.0, 3.0, 1.0]));
         assert_eq!(&canvas.surface().pixels[4..8], [20, 40, 80, 255]);
         assert_eq!(&canvas.surface().pixels[8..12], [110, 70, 40, 255]);
+    }
+
+    #[test]
+    fn clipped_surface_skips_offscreen_source_rows_and_transparent_pixels() {
+        let mut source = Surface::new(4, 4, [250, 0, 0, 0]);
+        let visible = ((2 * 4 + 2) * 4) as usize;
+        source.pixels[visible..visible + 4].copy_from_slice(&[9, 8, 7, 255]);
+        let hidden = ((3 * 4 + 2) * 4) as usize;
+        source.pixels[hidden..hidden + 4].copy_from_slice(&[1, 2, 3, 255]);
+        let mut canvas = Canvas::new(3, 2, [20, 40, 80, 255]);
+        assert!(canvas.blit_surface_clipped(&source, -1, -1, [0.0, 0.0, 3.0, 2.0]));
+        assert_eq!(&canvas.surface().pixels[4..8], [20, 40, 80, 255]);
+        assert_eq!(&canvas.surface().pixels[16..20], [9, 8, 7, 255]);
+        assert!(!canvas
+            .surface()
+            .pixels
+            .windows(4)
+            .any(|pixel| pixel == [1, 2, 3, 255]));
     }
 
     #[test]
