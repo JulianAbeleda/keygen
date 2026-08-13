@@ -8,7 +8,9 @@ compiled content remain local and player-owned.
 The canonical implementation contract is the
 [macOS compatibility scope](kg_ddlc_plus_scope.md), and the delegation-sized
 work breakdown is the [execution ledger](kg_ddlc_plus_tasks.md). This file is
-only the operator overview.
+only the operator overview. The method and lessons from reconstructing the
+first two interactive menu surfaces are recorded in the
+[two-screen first-principles retrospective](task_reports/two-screen-first-principles-learnings.md).
 
 ## Supported source
 
