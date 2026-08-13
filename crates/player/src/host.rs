@@ -12,6 +12,7 @@ pub enum HostEvent {
     Key {
         key: Key,
         pressed: bool,
+        modifiers: Modifiers,
     },
     Text(char),
     Pointer {
@@ -20,8 +21,35 @@ pub enum HostEvent {
         button: Option<MouseButton>,
         pressed: bool,
     },
+    Scroll {
+        delta: i32,
+    },
     Tick(Duration),
     Close,
+}
+
+/// Modifier state sampled with each key event. This is deliberately generic
+/// host metadata; applications decide what combinations mean.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub super_key: bool,
+}
+
+/// Convert a native vertical wheel delta into a bounded, discrete event.
+/// Invalid and zero values are ignored.
+pub(crate) fn normalize_scroll_delta(value: f32) -> Option<i32> {
+    if !value.is_finite() || value == 0.0 {
+        return None;
+    }
+    let magnitude = value.abs().round().clamp(1.0, 32.0) as i32;
+    Some(if value.is_sign_negative() {
+        -magnitude
+    } else {
+        magnitude
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +142,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let mut previous = started;
     let mut frame = 0;
     let mut previous_pointer = None;
+    let mut previous_left_down = false;
     while window.is_open() && !app.should_close() {
         let now = Instant::now();
         let delta = now.duration_since(previous);
@@ -127,7 +156,11 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
         };
         app.event(HostEvent::Tick(delta));
         for key in window.get_keys_pressed(KeyRepeat::Yes) {
-            app.event(HostEvent::Key { key, pressed: true });
+            app.event(HostEvent::Key {
+                key,
+                pressed: true,
+                modifiers: modifiers(&window),
+            });
         }
         for codepoint in text.borrow_mut().drain(..) {
             if let Some(character) = char::from_u32(codepoint) {
@@ -138,19 +171,34 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
             app.event(HostEvent::Key {
                 key,
                 pressed: false,
+                modifiers: modifiers(&window),
             });
+        }
+        if let Some((_, vertical)) = window.get_scroll_wheel() {
+            if let Some(delta) = normalize_scroll_delta(vertical) {
+                app.event(HostEvent::Scroll { delta });
+            }
         }
         if let Some((x, y)) = window.get_mouse_pos(MouseMode::Clamp) {
             let down = window.get_mouse_down(MouseButton::Left);
-            let pointer = (x, y, down);
+            let pointer = (x, y);
             if previous_pointer != Some(pointer) {
+                app.event(HostEvent::Pointer {
+                    x,
+                    y,
+                    button: None,
+                    pressed: down,
+                });
+                previous_pointer = Some(pointer);
+            }
+            if down != previous_left_down {
                 app.event(HostEvent::Pointer {
                     x,
                     y,
                     button: Some(MouseButton::Left),
                     pressed: down,
                 });
-                previous_pointer = Some(pointer);
+                previous_left_down = down;
             }
         }
         if frame == 0 || app.needs_redraw() {
@@ -177,6 +225,15 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     }
     app.event(HostEvent::Close);
     Ok(())
+}
+
+fn modifiers(window: &Window) -> Modifiers {
+    Modifiers {
+        shift: window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift),
+        ctrl: window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl),
+        alt: window.is_key_down(Key::LeftAlt) || window.is_key_down(Key::RightAlt),
+        super_key: window.is_key_down(Key::LeftSuper) || window.is_key_down(Key::RightSuper),
+    }
 }
 
 struct TextCollector {
@@ -292,5 +349,54 @@ mod tests {
             ..WindowPolicy::default()
         };
         assert!(policy.physical_size().is_err());
+    }
+
+    #[test]
+    fn scroll_normalization_discards_invalid_and_zero_values() {
+        assert_eq!(normalize_scroll_delta(0.0), None);
+        assert_eq!(normalize_scroll_delta(f32::NAN), None);
+        assert_eq!(normalize_scroll_delta(f32::INFINITY), None);
+        assert_eq!(normalize_scroll_delta(f32::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn scroll_normalization_rounds_preserves_sign_and_clamps() {
+        assert_eq!(normalize_scroll_delta(0.1), Some(1));
+        assert_eq!(normalize_scroll_delta(-0.1), Some(-1));
+        assert_eq!(normalize_scroll_delta(1.6), Some(2));
+        assert_eq!(normalize_scroll_delta(-1.6), Some(-2));
+        assert_eq!(normalize_scroll_delta(100.0), Some(32));
+        assert_eq!(normalize_scroll_delta(-100.0), Some(-32));
+    }
+
+    #[test]
+    fn key_event_carries_generic_modifiers() {
+        let event = HostEvent::Key {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ctrl: false,
+                alt: true,
+                super_key: false,
+            },
+        };
+        assert_eq!(
+            event,
+            HostEvent::Key {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers {
+                    shift: true,
+                    ctrl: false,
+                    alt: true,
+                    super_key: false,
+                },
+            }
+        );
+        assert_eq!(
+            HostEvent::Scroll { delta: -3 },
+            HostEvent::Scroll { delta: -3 }
+        );
     }
 }
