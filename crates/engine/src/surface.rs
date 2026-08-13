@@ -661,7 +661,7 @@ impl Canvas {
     /// Radius is capped at 32 logical pixels and the region at three million
     /// physical pixels to keep allocation and runtime predictable.
     pub fn blur_region(&mut self, rect: [f32; 4], radius: u32) {
-        let mut radius = radius.min(32) as i32;
+        let radius = (radius.min(32) as f32 * self.density).round().min(64.0) as i32;
         if radius == 0 {
             return;
         }
@@ -678,12 +678,6 @@ impl Canvas {
         let height = (bottom - top).max(0) as usize;
         if width == 0 || height == 0 || width.saturating_mul(height) > 3_000_000 {
             return;
-        }
-        // Large backdrop caches use a one-pixel separable kernel as a stable
-        // approximation; this keeps the one-time static effect within the
-        // frame budget while retaining deterministic softening.
-        if width.saturating_mul(height) > 1_500_000 {
-            radius = radius.min(1);
         }
         let mut original = vec![0u8; width * height * 4];
         for row in 0..height {
@@ -1033,6 +1027,29 @@ mod tests {
     }
 
     #[test]
+    fn blur_matches_reference_box_filter_for_requested_radius() {
+        let mut canvas = Canvas::new(9, 7, [0, 0, 0, 255]);
+        for y in 0..7 {
+            for x in 0..9 {
+                let i = (y * 9 + x) * 4;
+                canvas.surface.pixels[i..i + 4].copy_from_slice(&[
+                    (x * 17 + y * 3) as u8,
+                    (y * 21) as u8,
+                    x as u8,
+                    255,
+                ]);
+            }
+        }
+        let before = canvas.surface.pixels.clone();
+        canvas.blur_region([2.0, 1.0, 5.0, 4.0], 2);
+        assert_ne!(canvas.surface.pixels, before);
+        let mut replay = Canvas::new(9, 7, [0, 0, 0, 255]);
+        replay.surface.pixels.copy_from_slice(&before);
+        replay.blur_region([2.0, 1.0, 5.0, 4.0], 2);
+        assert_eq!(canvas.surface.pixels, replay.surface.pixels);
+    }
+
+    #[test]
     fn clipped_surface_composition_never_paints_outside_clip() {
         let source = Surface::new(4, 4, [255, 0, 0, 255]);
         let mut canvas = Canvas::new_scaled(8, 8, 2.0, [0, 0, 0, 255]);
@@ -1057,9 +1074,7 @@ mod tests {
             [10, 10, 20, 80],
             [120, 20, 80, 80],
         );
-        // Backdrop blur is a cached subregion; the full dialogue material
-        // remains an 828x648@2x frame while the effect itself is localized.
-        canvas.blur_region([0.0, 0.0, 400.0, 300.0], 4);
+        canvas.blur_region([0.0, 0.0, 828.0, 648.0], 7);
         std::hint::black_box(canvas.surface().pixels.as_slice());
         let elapsed = started.elapsed();
         eprintln!("representative 828x648@2x material: {elapsed:?}");
