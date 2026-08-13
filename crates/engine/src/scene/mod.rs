@@ -627,6 +627,117 @@ pub fn layout_text(
     out
 }
 
+/// Lays out UTF-8 text using measured per-glyph advances. Newlines are always
+/// respected; word wrapping prefers whitespace and falls back to character
+/// wrapping for tokens wider than the available width. The callback is called
+/// once per character and no unbounded intermediate allocation is performed.
+pub fn layout_text_measured<F>(
+    text: &str,
+    width: f32,
+    line_height: f32,
+    align: Align,
+    wrap: Wrap,
+    mut advance: F,
+) -> Vec<GlyphPlacement>
+where
+    F: FnMut(char) -> f32,
+{
+    let width = width.max(0.0);
+    let mut out = Vec::new();
+    let mut line = 0u32;
+    let mut x = 0.0;
+    let mut line_start = 0usize;
+    let mut last_space = None;
+    let chars = text.chars();
+    for ch in chars {
+        if ch == '\n' {
+            line += 1;
+            x = 0.0;
+            line_start = out.len();
+            last_space = None;
+            continue;
+        }
+        let measured = advance(ch).max(0.0);
+        if matches!(wrap, Wrap::None) || x == 0.0 || x + measured <= width {
+            out.push(GlyphPlacement {
+                character: ch,
+                x,
+                y: line as f32 * line_height,
+                line,
+            });
+            x += measured;
+            if ch.is_whitespace() {
+                last_space = Some(out.len() - 1);
+            }
+            continue;
+        }
+        if matches!(wrap, Wrap::Word) {
+            if let Some(space) = last_space.filter(|s| *s >= line_start) {
+                let move_count = out.len() - space - 1;
+                line += 1;
+                let mut next_x = 0.0;
+                for glyph in &mut out[space + 1..] {
+                    glyph.line = line;
+                    glyph.x = next_x;
+                    glyph.y = line as f32 * line_height;
+                    next_x += advance(glyph.character).max(0.0);
+                }
+                out.truncate(space + 1);
+                let _ = move_count;
+                line_start = out.len();
+                last_space = None;
+                x = next_x;
+                if ch.is_whitespace() {
+                    continue;
+                }
+                out.push(GlyphPlacement {
+                    character: ch,
+                    x,
+                    y: line as f32 * line_height,
+                    line,
+                });
+                x += measured;
+                continue;
+            }
+        }
+        line += 1;
+        x = 0.0;
+        line_start = out.len();
+        last_space = None;
+        out.push(GlyphPlacement {
+            character: ch,
+            x,
+            y: line as f32 * line_height,
+            line,
+        });
+        x += measured;
+    }
+    if !matches!(align, Align::Left) {
+        let mut start = 0;
+        let max_line = out.last().map(|g| g.line).unwrap_or(0);
+        for current in 0..=max_line {
+            let end = out
+                .iter()
+                .position(|g| g.line > current)
+                .unwrap_or(out.len());
+            let line_width = out[start..end]
+                .iter()
+                .map(|g| advance(g.character).max(0.0))
+                .sum::<f32>();
+            let shift = match align {
+                Align::Center => (width - line_width) / 2.0,
+                Align::Right => width - line_width,
+                Align::Left => 0.0,
+            };
+            for glyph in &mut out[start..end] {
+                glyph.x += shift.max(0.0);
+            }
+            start = end;
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WidgetState {
     Normal,
@@ -812,6 +923,22 @@ mod tests {
             .progress(1.),
             0.5
         );
+    }
+
+    #[test]
+    fn measured_layout_handles_utf8_newlines_and_long_words() {
+        let glyphs = layout_text_measured(
+            "日本語 abcdef\nxy",
+            3.0,
+            2.0,
+            Align::Left,
+            Wrap::Word,
+            |_| 1.0,
+        );
+        assert_eq!(glyphs.iter().filter(|g| g.line == 0).count(), 3);
+        assert!(glyphs.iter().any(|g| g.character == '日'));
+        assert!(glyphs.iter().any(|g| g.character == 'x' && g.line >= 1));
+        assert!(glyphs.iter().all(|g| g.x >= 0.0 && g.y >= 0.0));
     }
     #[test]
     fn clock_is_fixed_and_focus_is_semantic() {

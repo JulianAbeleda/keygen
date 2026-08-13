@@ -249,6 +249,23 @@ pub enum ImageFit {
     Stretch,
 }
 
+fn rounded_distance(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, radius: f32) -> f32 {
+    if w <= 0.0 || h <= 0.0 {
+        return 1.0;
+    }
+    let cx = (x + radius).max(x).min(x + w - radius);
+    let cy = (y + radius).max(y).min(y + h - radius);
+    let dx = (px - cx).abs() - radius;
+    let dy = (py - cy).abs() - radius;
+    dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0)
+}
+
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (f32::from(a) + (f32::from(b) - f32::from(a)) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
 /// A decoded font that can be reused by a [`Canvas`].
 #[derive(Clone)]
 pub struct FontFace(Font);
@@ -472,6 +489,160 @@ impl Canvas {
                     || ((py as f32) >= y + r && (py as f32) < y + h - r)
                 {
                     self.surface.blend(px, py, color, 1.0);
+                }
+            }
+        }
+    }
+
+    /// Draws a rounded rectangle with fixed four-by-four coverage samples.
+    /// Coordinates are logical pixels and the radius is clamped to the
+    /// rectangle. This is intentionally bounded and does not allocate.
+    pub fn rounded_rect_aa(&mut self, [x, y, w, h]: [f32; 4], radius: f32, color: [u8; 4]) {
+        self.rounded_shape([x, y, w, h], radius, color, false, 0.0);
+    }
+
+    /// Draws an antialiased rounded outline. The stroke is centered on the
+    /// supplied rectangle and is clipped to the canvas.
+    pub fn rounded_stroke(&mut self, rect: [f32; 4], radius: f32, width: f32, color: [u8; 4]) {
+        if width > 0.0 {
+            self.rounded_shape(rect, radius, color, true, width);
+        }
+    }
+
+    fn rounded_shape(
+        &mut self,
+        [x, y, w, h]: [f32; 4],
+        radius: f32,
+        color: [u8; 4],
+        stroke: bool,
+        width: f32,
+    ) {
+        if w <= 0.0 || h <= 0.0 || ![x, y, w, h, radius, width].iter().all(|v| v.is_finite()) {
+            return;
+        }
+        let s = self.density;
+        let x = x * s;
+        let y = y * s;
+        let w = w * s;
+        let h = h * s;
+        let r = radius.max(0.0).min(w.min(h) / 2.0);
+        let half = (width * s / 2.0).max(0.0);
+        let min_x = x.floor().max(0.0) as i32;
+        let min_y = y.floor().max(0.0) as i32;
+        let max_x = (x + w).ceil().min(self.surface.width as f32) as i32;
+        let max_y = (y + h).ceil().min(self.surface.height as f32) as i32;
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let mut coverage = 0.0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let qx = px as f32 + (sx as f32 + 0.5) / 4.0;
+                        let qy = py as f32 + (sy as f32 + 0.5) / 4.0;
+                        let outer = rounded_distance(qx, qy, x, y, w, h, r) <= 0.0;
+                        let inner = rounded_distance(
+                            qx,
+                            qy,
+                            x + half,
+                            y + half,
+                            (w - 2.0 * half).max(0.0),
+                            (h - 2.0 * half).max(0.0),
+                            (r - half).max(0.0),
+                        ) <= 0.0;
+                        if outer && (!stroke || !inner) {
+                            coverage += 1.0 / 16.0;
+                        }
+                    }
+                }
+                if coverage > 0.0 {
+                    self.surface.blend(px, py, color, coverage);
+                }
+            }
+        }
+    }
+
+    /// Fills a rectangle with a deterministic linear gradient from left to
+    /// right. The destination is clipped to the canvas.
+    pub fn linear_gradient(&mut self, [x, y, w, h]: [f32; 4], from: [u8; 4], to: [u8; 4]) {
+        if w <= 0.0 || h <= 0.0 || ![x, y, w, h].iter().all(|v| v.is_finite()) {
+            return;
+        }
+        let s = self.density;
+        let min_x = (x * s).floor().max(0.0) as i32;
+        let min_y = (y * s).floor().max(0.0) as i32;
+        let max_x = ((x + w) * s).ceil().min(self.surface.width as f32) as i32;
+        let max_y = ((y + h) * s).ceil().min(self.surface.height as f32) as i32;
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let t = ((px as f32 + 0.5) / s - x) / w;
+                let t = t.clamp(0.0, 1.0);
+                let color = [
+                    lerp_u8(from[0], to[0], t),
+                    lerp_u8(from[1], to[1], t),
+                    lerp_u8(from[2], to[2], t),
+                    lerp_u8(from[3], to[3], t),
+                ];
+                self.surface.blend(px, py, color, 1.0);
+            }
+        }
+    }
+
+    /// Applies a bounded separable box blur to a cached region in-place.
+    /// Radius is capped at 32 logical pixels and the region at two million
+    /// physical pixels to keep allocation and runtime predictable.
+    pub fn blur_region(&mut self, rect: [f32; 4], radius: u32) {
+        let radius = radius.min(32) as i32;
+        if radius == 0 {
+            return;
+        }
+        let s = self.density;
+        let left = (rect[0] * s).floor().max(0.0) as i32;
+        let top = (rect[1] * s).floor().max(0.0) as i32;
+        let right = ((rect[0] + rect[2]) * s)
+            .ceil()
+            .min(self.surface.width as f32) as i32;
+        let bottom = ((rect[1] + rect[3]) * s)
+            .ceil()
+            .min(self.surface.height as f32) as i32;
+        let width = (right - left).max(0) as usize;
+        let height = (bottom - top).max(0) as usize;
+        if width == 0 || height == 0 || width.saturating_mul(height) > 2_000_000 {
+            return;
+        }
+        let original = self.surface.pixels.clone();
+        let mut temp = original.clone();
+        for y in top..bottom {
+            for x in left..right {
+                let mut sum = [0u32; 4];
+                let mut count = 0;
+                for k in -radius..=radius {
+                    let sx = (x + k).clamp(left, right - 1);
+                    let i = ((y as u32 * self.surface.width + sx as u32) * 4) as usize;
+                    for c in 0..4 {
+                        sum[c] += u32::from(original[i + c]);
+                    }
+                    count += 1;
+                }
+                let i = ((y as u32 * self.surface.width + x as u32) * 4) as usize;
+                for (c, value) in sum.iter().enumerate() {
+                    temp[i + c] = (*value / count) as u8;
+                }
+            }
+        }
+        for y in top..bottom {
+            for x in left..right {
+                let mut sum = [0u32; 4];
+                let mut count = 0;
+                for k in -radius..=radius {
+                    let sy = (y + k).clamp(top, bottom - 1);
+                    let i = ((sy as u32 * self.surface.width + x as u32) * 4) as usize;
+                    for c in 0..4 {
+                        sum[c] += u32::from(temp[i + c]);
+                    }
+                    count += 1;
+                }
+                let i = ((y as u32 * self.surface.width + x as u32) * 4) as usize;
+                for (c, value) in sum.iter().enumerate() {
+                    self.surface.pixels[i + c] = (*value / count) as u8;
                 }
             }
         }
@@ -728,6 +899,43 @@ mod tests {
         assert_eq!(canvas.surface().pixels[24..28], [220, 10, 30, 255]);
         assert_eq!(canvas.surface().pixels[52..56], [220, 10, 30, 255]);
         assert_eq!(canvas.surface().pixels[0..4], [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn bounded_material_primitives_are_deterministic_and_antialiased() {
+        let mut a = Canvas::new_scaled(32, 24, 2.0, [0, 0, 0, 255]);
+        a.rounded_rect_aa([1.25, 1.25, 12.5, 8.5], 3.5, [20, 40, 80, 255]);
+        a.rounded_stroke([1.25, 1.25, 12.5, 8.5], 3.5, 1.0, [255, 10, 20, 255]);
+        a.linear_gradient([15.0, 1.0, 10.0, 8.0], [0, 0, 0, 255], [255, 0, 0, 255]);
+        a.blur_region([0.0, 0.0, 30.0, 20.0], 2);
+        let first = a.encode_png().unwrap();
+        let mut b = Canvas::new_scaled(32, 24, 2.0, [0, 0, 0, 255]);
+        b.rounded_rect_aa([1.25, 1.25, 12.5, 8.5], 3.5, [20, 40, 80, 255]);
+        b.rounded_stroke([1.25, 1.25, 12.5, 8.5], 3.5, 1.0, [255, 10, 20, 255]);
+        b.linear_gradient([15.0, 1.0, 10.0, 8.0], [0, 0, 0, 255], [255, 0, 0, 255]);
+        b.blur_region([0.0, 0.0, 30.0, 20.0], 2);
+        assert_eq!(first, b.encode_png().unwrap());
+        assert!(a
+            .surface()
+            .pixels
+            .chunks_exact(4)
+            .any(|p| p[0] > 0 && p[0] < 255));
+    }
+
+    #[test]
+    fn blur_is_bounded_without_touching_outside_region() {
+        let mut canvas = Canvas::new(8, 8, [0, 0, 0, 255]);
+        canvas.fill_rect([2.0, 2.0, 2.0, 2.0], [255, 255, 255, 255]);
+        let before = canvas.surface().pixels.clone();
+        canvas.blur_region([2.0, 2.0, 2.0, 2.0], 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                if !(2..4).contains(&x) || !(2..4).contains(&y) {
+                    let i = (y * 8 + x) * 4;
+                    assert_eq!(&before[i..i + 4], &canvas.surface().pixels[i..i + 4]);
+                }
+            }
+        }
     }
 
     #[test]
