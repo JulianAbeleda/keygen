@@ -418,6 +418,89 @@ impl Canvas {
         true
     }
 
+    /// Alpha-composites a source surface at physical backing-pixel coordinates.
+    /// Unlike `blend_surface`, this accepts translucent pixels and is intended
+    /// for material effects such as blurred shadows.
+    pub fn composite_surface(
+        &mut self,
+        source: &Surface,
+        left: i32,
+        top: i32,
+        opacity: f32,
+    ) -> bool {
+        if source.pixels.len() != source.width as usize * source.height as usize * 4 {
+            return false;
+        }
+        if opacity <= 0.0 {
+            return true;
+        }
+        for sy in 0..source.height as i32 {
+            let dy = top + sy;
+            if dy < 0 || dy >= self.surface.height as i32 {
+                continue;
+            }
+            for sx in 0..source.width as i32 {
+                let dx = left + sx;
+                if dx < 0 || dx >= self.surface.width as i32 {
+                    continue;
+                }
+                let source_offset = ((sy as u32 * source.width + sx as u32) * 4) as usize;
+                self.surface.blend(
+                    dx,
+                    dy,
+                    source.pixels[source_offset..source_offset + 4]
+                        .try_into()
+                        .expect("RGBA chunk has four channels"),
+                    opacity,
+                );
+            }
+        }
+        true
+    }
+
+    /// Draws a CSS-style blurred rounded shadow with enough offscreen padding
+    /// for the blur kernel to extend past every edge and corner.
+    pub fn rounded_shadow(
+        &mut self,
+        [x, y, width, height]: [f32; 4],
+        radius: f32,
+        [offset_x, offset_y]: [f32; 2],
+        blur_radius: u32,
+        color: [u8; 4],
+    ) {
+        if width <= 0.0
+            || height <= 0.0
+            || ![x, y, width, height, radius, offset_x, offset_y]
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            return;
+        }
+        let blur_radius = blur_radius.min(32);
+        if blur_radius == 0 {
+            self.rounded_rect_aa([x + offset_x, y + offset_y, width, height], radius, color);
+            return;
+        }
+        let padding = blur_radius as f32 * 2.0 + 2.0;
+        let temporary_width = (width + padding * 2.0).ceil() as u32;
+        let temporary_height = (height + padding * 2.0).ceil() as u32;
+        let mut shadow = Canvas::new_scaled(
+            temporary_width,
+            temporary_height,
+            self.density,
+            [color[0], color[1], color[2], 0],
+        );
+        shadow.rounded_rect_aa([padding, padding, width, height], radius, color);
+        shadow.blur_region(
+            [0.0, 0.0, temporary_width as f32, temporary_height as f32],
+            blur_radius,
+        );
+        let left = ((x + offset_x - padding) * self.density).round() as i32;
+        let top = ((y + offset_y - padding) * self.density).round() as i32;
+        let composited = self.composite_surface(&shadow.into_surface(), left, top, 1.0);
+        debug_assert!(composited);
+    }
+
     /// Copies an opaque cached region at a logical offset while applying a
     /// logical rectangular clip. This is the minimal masked composition
     /// primitive needed for bounded history scrollback and never paints
@@ -1149,6 +1232,23 @@ mod tests {
         assert_eq!(red(10, 3), 255);
         assert_eq!(red(4, 9), 255);
         assert_eq!(red(20, 12), 255);
+    }
+
+    #[test]
+    fn blurred_rounded_shadow_extends_past_edges_and_corners() {
+        let mut canvas = Canvas::new(48, 40, [255, 255, 255, 255]);
+        canvas.rounded_shadow(
+            [12.0, 10.0, 20.0, 14.0],
+            5.0,
+            [0.0, 3.0],
+            5,
+            [10, 12, 24, 180],
+        );
+        let at = |x: usize, y: usize| &canvas.surface().pixels[(y * 48 + x) * 4..][..4];
+        assert_ne!(at(12, 10), &[255, 255, 255, 255]);
+        assert_ne!(at(9, 13), &[255, 255, 255, 255]);
+        assert_ne!(at(35, 27), &[255, 255, 255, 255]);
+        assert_eq!(at(0, 0), &[255, 255, 255, 255]);
     }
 
     #[test]
