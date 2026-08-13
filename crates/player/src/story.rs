@@ -3,6 +3,7 @@
 //! This is deliberately presentation-neutral: a window host consumes the returned
 //! dialogue, choice, and side-effect values while the deterministic VM remains in
 //! `keygen-engine`.
+use keygen_engine::project::ProjectManifest;
 use keygen_engine::story::{Effect, Program, Value, Vm};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::Path};
@@ -29,6 +30,67 @@ pub struct StoryFrame {
     pub view: StoryView,
     /// Non-dialogue effects are retained for the host compositor/audio adapter.
     pub effects: Vec<Effect>,
+}
+
+pub const MAX_STORY_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_CHOICE_COUNT: usize = 256;
+pub const MAX_CHOICE_TEXT_BYTES: usize = 4 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoryEvent {
+    Advanced,
+    Selected(usize),
+    Back,
+}
+
+/// Package-aware interaction state used by a native host. It resolves the
+/// declared project entry rather than guessing a title-specific label.
+pub struct StoryHost {
+    pub story: PackagedStory,
+    program: Program,
+    entry: String,
+    pub events: Vec<StoryEvent>,
+}
+
+impl StoryHost {
+    pub fn load(package_root: impl AsRef<Path>) -> Result<Self, String> {
+        let root = package_root.as_ref();
+        let project = ProjectManifest::load(root.join("project.json"))?;
+        let entry = project
+            .story
+            .as_ref()
+            .ok_or("project has no story entry")?
+            .entry
+            .clone();
+        let bytes = fs::read(root.join("story.json"))
+            .map_err(|e| format!("cannot read packaged story: {e}"))?;
+        let program: Program = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("cannot parse packaged story: {e}"))?;
+        let mut story = PackagedStory::new(program.clone())?;
+        story.start(&entry)?;
+        Ok(Self {
+            story,
+            program,
+            entry,
+            events: Vec::new(),
+        })
+    }
+    pub fn advance(&mut self) -> Result<StoryFrame, String> {
+        let frame = self.story.advance()?;
+        self.events.push(StoryEvent::Advanced);
+        Ok(frame)
+    }
+    pub fn select(&mut self, index: usize) -> Result<(), String> {
+        self.story.select(index)?;
+        self.events.push(StoryEvent::Selected(index));
+        Ok(())
+    }
+    pub fn back(&mut self) -> Result<(), String> {
+        self.story = PackagedStory::new(self.program.clone())?;
+        self.story.start(&self.entry)?;
+        self.events.push(StoryEvent::Back);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -97,10 +159,13 @@ impl PackagedStory {
             for effect in effects {
                 match effect {
                     Effect::Dialog { text } => {
+                        if text.len() > MAX_STORY_TEXT_BYTES {
+                            return Err("dialogue exceeds bounded text size".into());
+                        }
                         return Ok(StoryFrame {
                             view: StoryView::Dialogue(StoryDialogue { text }),
                             effects: side_effects,
-                        })
+                        });
                     }
                     Effect::Capability { id, args }
                         if id.replace('_', "").eq_ignore_ascii_case("menuinput") =>
@@ -160,6 +225,12 @@ fn parse_choice(mut args: BTreeMap<String, Value>) -> Result<(StoryChoice, Vec<S
     };
     if entries.is_empty() || entries.len() != labels.len() {
         return Err("choice entries and labels must align".into());
+    }
+    if entries.len() > MAX_CHOICE_COUNT
+        || entries.iter().any(|v| v.len() > MAX_CHOICE_TEXT_BYTES)
+        || labels.iter().any(|v| v.len() > MAX_CHOICE_TEXT_BYTES)
+    {
+        return Err("choice payload exceeds bounded presentation size".into());
     }
     Ok((StoryChoice { prompt, entries }, labels))
 }

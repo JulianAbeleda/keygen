@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn usage() -> &'static str {
-    "usage:\n  keygen inspect PROJECT\n  keygen validate PROJECT\n  keygen load PROJECT\n  keygen render PROJECT --scene FILE --output PNG [--time SECONDS]\n  keygen e2e PROJECT\n\nlegacy scene mode:\n  keygen --scene FILE [--render PNG] [--time SECONDS] [--smoke-seconds SECONDS] [--validate]"
+    "usage:\n  keygen inspect PROJECT\n  keygen validate PROJECT\n  keygen load PROJECT\n  keygen render PROJECT --scene FILE --output PNG [--time SECONDS]\n  keygen story PROJECT\n  keygen trace PROJECT\n  keygen e2e PROJECT\n\nlegacy scene mode:\n  keygen --scene FILE [--render PNG] [--time SECONDS] [--smoke-seconds SECONDS] [--validate]"
 }
 
 fn main() {
@@ -39,10 +39,54 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "load" => project_summary(project(&args, 1)?, true),
         "render" => render_project(&args),
+        "story" => story_project(&args),
+        "trace" => trace_project(&args),
         "e2e" => e2e_project(&args),
         "help" | "--help" | "-h" => Err(usage().into()),
         other => Err(format!("unknown command: {other}")),
     }
+}
+
+fn story_project(args: &[String]) -> Result<(), String> {
+    let project_path = PathBuf::from(args.get(1).ok_or("PROJECT is required")?);
+    let package = project_path
+        .parent()
+        .ok_or("project has no package directory")?;
+    let mut host = keygen_player::story::StoryHost::load(package)?;
+    let frame = host.advance()?;
+    println!("story OK: {:?}", frame.view);
+    Ok(())
+}
+
+fn trace_project(args: &[String]) -> Result<(), String> {
+    let project_path = PathBuf::from(args.get(1).ok_or("PROJECT is required")?);
+    let package = project_path
+        .parent()
+        .ok_or("project has no package directory")?;
+    let manifest = ProjectManifest::load(&project_path)?;
+    let mut navigator = keygen_engine::runtime::ProjectRouteNavigator::new(manifest.clone())?;
+    navigator.advance_boot();
+    println!("trace: {:?}", navigator.route());
+    let route = manifest
+        .routes
+        .first()
+        .ok_or("project has no launcher routes")?;
+    let route_id = route.id.clone();
+    let selected = navigator.activate(&route_id)?;
+    let scene = keygen_player::load_route_scene(package, &manifest, &route_id)?;
+    println!(
+        "trace: {:?} scene={}x{}",
+        selected, scene.spec.design_width, scene.spec.design_height
+    );
+    if matches!(selected, keygen_engine::runtime::Route::Story { .. }) {
+        let mut story = keygen_player::story::StoryHost::load(package)?;
+        let frame = story.advance()?;
+        println!("trace: story {:?}", frame.view);
+    }
+    navigator.back();
+    navigator.close();
+    println!("trace: {:?}", navigator.route());
+    Ok(())
 }
 
 /// Launch the canonical scene when Finder/LaunchServices starts a packaged

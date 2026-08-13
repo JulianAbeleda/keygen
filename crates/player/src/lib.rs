@@ -16,6 +16,7 @@ use std::{
 pub mod native;
 pub mod storage;
 pub mod story;
+use story::{StoryHost, StoryView};
 
 /// Resolve a launcher route to its packaged scene document.
 ///
@@ -219,7 +220,7 @@ fn run(args: Args) -> Result<(), String> {
         return Ok(());
     }
     let navigator = packaged_navigator(&args.scene);
-    run_window(scene, args.smoke_seconds, navigator)
+    run_window(scene, args.smoke_seconds, navigator, args.scene)
 }
 
 fn packaged_navigator(scene: &Path) -> Option<ProjectRouteNavigator> {
@@ -231,9 +232,10 @@ fn packaged_navigator(scene: &Path) -> Option<ProjectRouteNavigator> {
 }
 
 fn run_window(
-    scene: Scene,
+    mut scene: Scene,
     smoke_seconds: Option<f32>,
     mut navigator: Option<ProjectRouteNavigator>,
+    scene_path: PathBuf,
 ) -> Result<(), String> {
     native::require_supported_host()?;
     let width = scene.spec.design_width as usize;
@@ -254,6 +256,9 @@ fn run_window(
     let mut focused = first_enabled(&scene, 0);
     let mut mouse_was_down = false;
     let mut pressed_entry = None;
+    let package_root = scene_path.parent().and_then(Path::parent);
+    let mut story_host = package_root.and_then(|root| StoryHost::load(root).ok());
+    let mut story_choice: Option<usize> = None;
     if let Some(router) = navigator.as_mut() {
         router.advance_boot();
     }
@@ -315,9 +320,65 @@ fn run_window(
                 }
                 if let Some(router) = navigator.as_mut() {
                     match router.activate(&entry.id) {
-                        Ok(route) => println!("route transition: {route:?}"),
+                        Ok(route) => {
+                            let package_root = scene_path
+                                .parent()
+                                .and_then(Path::parent)
+                                .ok_or("scene is not inside a package")?;
+                            match load_route_scene(package_root, router.project(), &entry.id) {
+                                Ok(next)
+                                    if next.spec.design_width as usize == width
+                                        && next.spec.design_height as usize == height =>
+                                {
+                                    scene = next;
+                                    focused = first_enabled(&scene, 0);
+                                    pressed_entry = None;
+                                    println!("route transition: {route:?}");
+                                    if matches!(route, keygen_engine::runtime::Route::Story { .. })
+                                    {
+                                        if let Some(host) = story_host.as_mut() {
+                                            match host.advance() {
+                                                Ok(frame) => {
+                                                    apply_story_frame(&mut scene, &frame);
+                                                    story_choice = print_story_frame(&frame)
+                                                }
+                                                Err(error) => println!("story error: {error}"),
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(next) => {
+                                    router.back();
+                                    println!(
+                                        "route unavailable for {}: scene dimensions {}x{} do not match window {}x{}",
+                                        entry.id,
+                                        next.spec.design_width,
+                                        next.spec.design_height,
+                                        width,
+                                        height
+                                    );
+                                }
+                                Err(error) => {
+                                    router.back();
+                                    println!("route unavailable for {}: {error}", entry.id);
+                                }
+                            }
+                        }
                         Err(error) => println!("route unavailable for {}: {error}", entry.id),
                     }
+                }
+            } else if let Some(host) = story_host.as_mut() {
+                let result = if let Some(choice) = story_choice.take() {
+                    host.select(choice).and_then(|_| host.advance())
+                } else {
+                    host.advance()
+                };
+                match result {
+                    Ok(frame) => {
+                        apply_story_frame(&mut scene, &frame);
+                        story_choice = print_story_frame(&frame)
+                    }
+                    Err(error) => println!("story input error: {error}"),
                 }
             }
         }
@@ -327,6 +388,38 @@ fn run_window(
             .map_err(|error| format!("native frame failed: {error}"))?;
     }
     Ok(())
+}
+
+fn print_story_frame(frame: &story::StoryFrame) -> Option<usize> {
+    let is_choice = matches!(frame.view, StoryView::Choice(_));
+    match &frame.view {
+        StoryView::Dialogue(dialogue) => println!("story dialogue: {}", dialogue.text),
+        StoryView::Choice(choice) => {
+            println!(
+                "story choice: {} [{}]",
+                choice.prompt,
+                choice.entries.join(" | ")
+            );
+        }
+        StoryView::Effects => println!("story effects: {}", frame.effects.len()),
+        StoryView::Complete => println!("story complete"),
+    }
+    if is_choice {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+fn apply_story_frame(scene: &mut Scene, frame: &story::StoryFrame) {
+    let text = match &frame.view {
+        StoryView::Dialogue(dialogue) => dialogue.text.clone(),
+        StoryView::Choice(choice) => format!("{}\n{}", choice.prompt, choice.entries.join("\n")),
+        StoryView::Effects | StoryView::Complete => return,
+    };
+    if let Some(layer) = scene.spec.text_layers.first_mut() {
+        layer.text = text;
+    }
 }
 
 fn first_enabled(scene: &Scene, start: usize) -> usize {

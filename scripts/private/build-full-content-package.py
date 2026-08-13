@@ -66,8 +66,10 @@ def build(source: Path, output: Path, limit: int, max_bytes: int) -> dict:
         assets.append({"id": record["logical_id"], "kind": record["kind"], "logical_path": f"assets/{actual}", "sha256": actual})
     grouped = {}
     for record in records: grouped.setdefault(category(record), []).append(record["logical_id"])
-    for name, ids in sorted(grouped.items()):
-        (scenes_dir / f"{name}.json").write_text(json.dumps({"schema":"keygen.scene.v1", "id":f"scene.{name}", "asset_ids":ids, "design_width":1920, "design_height":1080}, indent=2, sort_keys=True) + "\n")
+    # Category scenes are initially declared below; each receives the same
+    # renderable boot composition with a category-specific title/status so a
+    # route can actually load and display it.  Asset membership remains in the
+    # project manifest and is audited independently.
     # A packaged application needs one concrete, renderable boot scene.  Keep
     # this generic: prefer the recovered DOS font/logo when present, but never
     # assume a title-specific asset exists.  The scene itself references only
@@ -77,12 +79,19 @@ def build(source: Path, output: Path, limit: int, max_bytes: int) -> dict:
                  if r["kind"] == "image" and "logo" in r["source_path"].lower()), None)
     if font is None:
         font = next((a for a in assets if a["kind"] == "font"), None)
+    menu_entries = [{"id": f"route.{name}", "label": name.title(), "enabled": True}
+                    for name in sorted(grouped)]
+    menu_entries.append({"id": "exit", "label": "Exit", "enabled": True})
     boot = {
         "schema": "keygen.scene.v1", "title": "KeyGen", "design_width": 1920,
         "design_height": 1080, "clear": [8, 10, 16, 255],
         "font_path": f"../{font['logical_path']}" if font else "",
-        "layers": [], "particle_insertions": [], "menu_insertion": None,
-        "menu": None, "text_layers": [{"id": "boot-status", "text": "KEYGEN BOOT",
+        "layers": [], "particle_insertions": [], "menu_insertion": 0,
+        "menu": {"x": 64.0, "y": 180.0, "width": 640.0, "row_height": 42.0,
+        "spacing": 8.0, "font_size": 24.0, "outline_width": 1,
+        "color": [220, 230, 245, 255], "outline": [0, 0, 0, 255],
+        "focused_outline": [255, 220, 120, 255], "entries": menu_entries},
+        "text_layers": [{"id": "boot-status", "text": "KEYGEN BOOT",
         "x": 64.0, "y": 64.0, "font_size": 32.0, "color": [220, 230, 245, 255],
         "outline": [0, 0, 0, 255], "outline_width": 1, "visible_at": 0.0,
         "characters_per_second": None}], "particles": None, "fade": None,
@@ -93,6 +102,16 @@ def build(source: Path, output: Path, limit: int, max_bytes: int) -> dict:
                                 "anchor": "center", "alpha": 1.0, "entrance": None,
                                 "motion": None})
     (scenes_dir / "boot.json").write_text(json.dumps(boot, indent=2, sort_keys=True) + "\n")
+    for name in sorted(grouped):
+        category_scene = dict(boot)
+        category_scene["title"] = f"KeyGen — {name.title()}"
+        category_scene["menu"] = None
+        category_scene["menu_insertion"] = None
+        category_scene["text_layers"] = [{"id": "category-status", "text": f"KEYGEN / {name.upper()}",
+            "x": 64.0, "y": 64.0, "font_size": 32.0, "color": [220, 230, 245, 255],
+            "outline": [0, 0, 0, 255], "outline_width": 1, "visible_at": 0.0,
+            "characters_per_second": None}]
+        (scenes_dir / f"{name}.json").write_text(json.dumps(category_scene, indent=2, sort_keys=True) + "\n")
     text_paths = [source / r["source_path"] for r in records if r["kind"] == "text"]
     story = output / "story.json"
     subprocess.run([sys.executable, str(IMPORT), *map(str, text_paths), "--output", str(story), "--limit", str(limit)], cwd=ROOT, check=True)
