@@ -33,3 +33,7 @@ existing `render_frame` remains source-compatible and delegates at density 1.
 Risk: fixed 4×4 sampling is a compact deterministic fallback rather than an
 analytic tiny-skia mask; very thin features can vary with sample placement.
 The API leaves room to replace the implementation without changing callers.
+
+Also added `Canvas::blit_surface`, a clipped exact physical-coordinate copy
+for opaque RGBA8 surfaces. It rejects source alpha other than 255 and covers
+clipping, density/backing coordinates, determinism, and alpha rejection.

@@ -329,6 +329,34 @@ impl Canvas {
     pub fn into_surface(self) -> Surface {
         self.surface
     }
+    /// Copies an opaque surface at exact physical backing-pixel coordinates.
+    /// Returns `false` when the source contains non-opaque pixels.
+    pub fn blit_surface(&mut self, source: &Surface, left: i32, top: i32) -> bool {
+        if source.pixels.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+            return false;
+        }
+        let source_x = (-left).max(0).min(source.width as i32);
+        let source_y = (-top).max(0).min(source.height as i32);
+        let source_end_x = (self.surface.width as i32 - left)
+            .max(0)
+            .min(source.width as i32);
+        let source_end_y = (self.surface.height as i32 - top)
+            .max(0)
+            .min(source.height as i32);
+        if source_x >= source_end_x || source_y >= source_end_y {
+            return true;
+        }
+        let copy_bytes = (source_end_x - source_x) as usize * 4;
+        for sy in source_y..source_end_y {
+            let source_offset = (sy as usize * source.width as usize + source_x as usize) * 4;
+            let destination_offset = ((top + sy) as usize * self.surface.width as usize
+                + (left + source_x) as usize)
+                * 4;
+            self.surface.pixels[destination_offset..destination_offset + copy_bytes]
+                .copy_from_slice(&source.pixels[source_offset..source_offset + copy_bytes]);
+        }
+        true
+    }
     pub fn fill_rect(&mut self, rect: [f32; 4], color: [u8; 4]) {
         self.rect(rect, color, None);
     }
@@ -898,5 +926,26 @@ mod tests {
             "10 representative 1600x900@2x polygon draws: {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn opaque_surface_blit_copies_clips_and_replays() {
+        let source = Surface::new(3, 2, [0, 0, 0, 255]);
+        let mut canvas = Canvas::new(4, 3, [1, 2, 3, 255]);
+        assert!(canvas.blit_surface(&source, -1, 1));
+        assert_eq!(&canvas.surface().pixels[16..][..4], [0, 0, 0, 255]);
+        let mut replay = Canvas::new(4, 3, [1, 2, 3, 255]);
+        assert!(replay.blit_surface(&source, -1, 1));
+        assert_eq!(canvas.surface().pixels, replay.surface().pixels);
+        let translucent = Surface::new(1, 1, [9, 8, 7, 128]);
+        assert!(!canvas.blit_surface(&translucent, 0, 0));
+    }
+
+    #[test]
+    fn surface_blit_uses_exact_backing_coordinates_at_density() {
+        let source = Surface::new(2, 1, [9, 8, 7, 255]);
+        let mut canvas = Canvas::new_scaled(2, 1, 2.0, [0, 0, 0, 255]);
+        assert!(canvas.blit_surface(&source, 2, 1));
+        assert_eq!(&canvas.surface().pixels[24..][..4], [9, 8, 7, 255]);
     }
 }
