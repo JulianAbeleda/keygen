@@ -226,22 +226,49 @@ impl FontFace {
 /// Coordinates are design-space pixels and output is deterministic RGBA8.
 pub struct Canvas {
     surface: Surface,
+    logical_width: u32,
+    logical_height: u32,
+    density: f32,
 }
 
 impl Canvas {
     pub fn new(width: u32, height: u32, clear: [u8; 4]) -> Self {
         Self {
             surface: Surface::new(width, height, clear),
+            logical_width: width,
+            logical_height: height,
+            density: 1.0,
+        }
+    }
+    /// Create a high-density surface while keeping all drawing coordinates in
+    /// logical pixels. Hosts can present the returned physical pixels directly
+    /// on a Retina/HiDPI backing surface without post-raster scaling text.
+    pub fn new_scaled(width: u32, height: u32, density: f32, clear: [u8; 4]) -> Self {
+        let density = if density.is_finite() {
+            density.clamp(1.0, 4.0)
+        } else {
+            1.0
+        };
+        let physical_width = (width as f32 * density).round().max(1.0) as u32;
+        let physical_height = (height as f32 * density).round().max(1.0) as u32;
+        Self {
+            surface: Surface::new(physical_width, physical_height, clear),
+            logical_width: width,
+            logical_height: height,
+            density,
         }
     }
     pub fn width(&self) -> u32 {
-        self.surface.width
+        self.logical_width
     }
     pub fn height(&self) -> u32 {
-        self.surface.height
+        self.logical_height
+    }
+    pub fn density(&self) -> f32 {
+        self.density
     }
     pub fn clear(&mut self, color: [u8; 4]) {
-        self.surface = Surface::new(self.width(), self.height(), color);
+        self.surface = Surface::new(self.surface.width, self.surface.height, color);
     }
     pub fn surface(&self) -> &Surface {
         &self.surface
@@ -258,15 +285,18 @@ impl Canvas {
         if spacing == 0 || radius == 0 || w <= 0.0 || h <= 0.0 {
             return;
         }
-        let start_x = x.floor().max(0.0) as i32;
-        let start_y = y.floor().max(0.0) as i32;
-        let end_x = (x + w).ceil().min(self.width() as f32) as i32;
-        let end_y = (y + h).ceil().min(self.height() as f32) as i32;
-        for center_y in (start_y..end_y).step_by(spacing as usize) {
-            for center_x in (start_x..end_x).step_by(spacing as usize) {
-                for offset_y in -(radius as i32)..=radius as i32 {
-                    for offset_x in -(radius as i32)..=radius as i32 {
-                        if offset_x * offset_x + offset_y * offset_y <= (radius * radius) as i32 {
+        let scale = self.density;
+        let spacing = (spacing as f32 * scale).round().max(1.0) as usize;
+        let radius = (radius as f32 * scale).round().max(1.0) as i32;
+        let start_x = (x * scale).floor().max(0.0) as i32;
+        let start_y = (y * scale).floor().max(0.0) as i32;
+        let end_x = ((x + w) * scale).ceil().min(self.surface.width as f32) as i32;
+        let end_y = ((y + h) * scale).ceil().min(self.surface.height as f32) as i32;
+        for center_y in (start_y..end_y).step_by(spacing) {
+            for center_x in (start_x..end_x).step_by(spacing) {
+                for offset_y in -radius..=radius {
+                    for offset_x in -radius..=radius {
+                        if offset_x * offset_x + offset_y * offset_y <= radius * radius {
                             self.surface.blend(
                                 center_x + offset_x,
                                 center_y + offset_y,
@@ -283,9 +313,15 @@ impl Canvas {
         self.rect(rect, color, Some(width));
     }
     fn rect(&mut self, [x, y, w, h]: [f32; 4], color: [u8; 4], stroke: Option<f32>) {
-        let edge = stroke.unwrap_or(h.max(w));
-        for py in 0..self.height() as i32 {
-            for px in 0..self.width() as i32 {
+        let scale = self.density;
+        let (x, y, w, h) = (x * scale, y * scale, w * scale, h * scale);
+        let edge = stroke.map(|value| value * scale).unwrap_or(h.max(w));
+        let start_x = x.floor().max(0.0) as i32;
+        let start_y = y.floor().max(0.0) as i32;
+        let end_x = (x + w).ceil().min(self.surface.width as f32) as i32;
+        let end_y = (y + h).ceil().min(self.surface.height as f32) as i32;
+        for py in start_y..end_y {
+            for px in start_x..end_x {
                 let inside = (px as f32) >= x
                     && (px as f32) < x + w
                     && (py as f32) >= y
@@ -302,9 +338,15 @@ impl Canvas {
         }
     }
     pub fn rounded_rect(&mut self, [x, y, w, h]: [f32; 4], radius: f32, color: [u8; 4]) {
+        let scale = self.density;
+        let (x, y, w, h, radius) = (x * scale, y * scale, w * scale, h * scale, radius * scale);
         let r = radius.max(0.0).min(w.min(h) / 2.0);
-        for py in 0..self.height() as i32 {
-            for px in 0..self.width() as i32 {
+        let start_x = x.floor().max(0.0) as i32;
+        let start_y = y.floor().max(0.0) as i32;
+        let end_x = (x + w).ceil().min(self.surface.width as f32) as i32;
+        let end_y = (y + h).ceil().min(self.surface.height as f32) as i32;
+        for py in start_y..end_y {
+            for px in start_x..end_x {
                 let qx = (px as f32 - (x + r).max(x).min(x + w - r)).abs();
                 let qy = (py as f32 - (y + r).max(y).min(y + h - r)).abs();
                 if qx * qx + qy * qy <= r * r
@@ -320,6 +362,10 @@ impl Canvas {
         if points.len() < 3 {
             return;
         }
+        let points = points
+            .iter()
+            .map(|point| [point[0] * self.density, point[1] * self.density])
+            .collect::<Vec<_>>();
         let min_x = points
             .iter()
             .map(|p| p[0])
@@ -331,7 +377,7 @@ impl Canvas {
             .map(|p| p[0])
             .fold(f32::NEG_INFINITY, f32::max)
             .ceil()
-            .min(self.width() as f32) as i32;
+            .min(self.surface.width as f32) as i32;
         let min_y = points
             .iter()
             .map(|p| p[1])
@@ -343,7 +389,7 @@ impl Canvas {
             .map(|p| p[1])
             .fold(f32::NEG_INFINITY, f32::max)
             .ceil()
-            .min(self.height() as f32) as i32;
+            .min(self.surface.height as f32) as i32;
         for y in min_y..max_y {
             for x in min_x..max_x {
                 let mut hit = false;
@@ -365,7 +411,12 @@ impl Canvas {
         }
     }
     pub fn image(&mut self, image: &Image, rect: [f32; 4], fit: ImageFit, opacity: f32) {
-        let (x, y, w, h) = (rect[0], rect[1], rect[2], rect[3]);
+        let (x, y, w, h) = (
+            rect[0] * self.density,
+            rect[1] * self.density,
+            rect[2] * self.density,
+            rect[3] * self.density,
+        );
         if fit == ImageFit::Stretch {
             self.surface.draw_image_region_scaled(
                 image,
@@ -412,19 +463,24 @@ impl Canvas {
         outline: Option<(f32, [u8; 4])>,
         letter_spacing: f32,
     ) {
-        let mut x = origin[0];
+        let density = self.density;
+        let mut x = origin[0] * density;
+        let baseline = origin[1] * density;
+        let size = size * density;
+        let letter_spacing = letter_spacing * density;
         for (index, ch) in text.chars().enumerate() {
             if index > 0 {
                 x += letter_spacing;
             }
             let (metrics, bitmap) = face.0.rasterize(ch, size);
             let glyph_x = x + metrics.xmin as f32;
-            let glyph_y = origin[1] - metrics.ymin as f32 - metrics.height as f32;
+            let glyph_y = baseline - metrics.ymin as f32 - metrics.height as f32;
             for gy in 0..metrics.height {
                 for gx in 0..metrics.width {
                     let a = bitmap[gy * metrics.width + gx];
                     if a > 0 {
                         if let Some((radius, oc)) = outline {
+                            let radius = radius * density;
                             for oy in -(radius as i32)..=radius as i32 {
                                 for ox in -(radius as i32)..=radius as i32 {
                                     self.surface.blend(
@@ -489,6 +545,28 @@ mod tests {
         assert_eq!(canvas.surface().pixels[24..28], [220, 10, 30, 255]);
         assert_eq!(canvas.surface().pixels[52..56], [220, 10, 30, 255]);
         assert_eq!(canvas.surface().pixels[0..4], [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn scaled_canvas_preserves_logical_geometry_at_physical_density() {
+        let mut canvas = Canvas::new_scaled(8, 5, 2.0, [0, 0, 0, 255]);
+        assert_eq!([canvas.width(), canvas.height()], [8, 5]);
+        assert_eq!([canvas.surface().width, canvas.surface().height], [16, 10]);
+        assert_eq!(canvas.density(), 2.0);
+        canvas.fill_rect([1.0, 1.0, 2.0, 1.0], [255, 0, 0, 255]);
+        let at = |x: usize, y: usize| (y * 16 + x) * 4;
+        assert_eq!(
+            canvas.surface().pixels[at(2, 2)..at(2, 2) + 4],
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            canvas.surface().pixels[at(5, 3)..at(5, 3) + 4],
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            canvas.surface().pixels[at(6, 3)..at(6, 3) + 4],
+            [0, 0, 0, 255]
+        );
     }
 
     #[test]

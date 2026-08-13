@@ -44,6 +44,9 @@ pub trait Application {
 pub struct WindowPolicy {
     pub width: usize,
     pub height: usize,
+    /// Physical raster pixels per logical drawing pixel. A value of 2 renders
+    /// crisp text on common Retina displays while preserving app coordinates.
+    pub pixel_density: u8,
     pub resizable: bool,
     pub fullscreen: bool,
     pub title: String,
@@ -54,6 +57,7 @@ impl Default for WindowPolicy {
         Self {
             width: 1280,
             height: 720,
+            pixel_density: 1,
             resizable: true,
             fullscreen: false,
             title: "KeyGen".into(),
@@ -64,6 +68,9 @@ impl Default for WindowPolicy {
 /// Run an application in a native minifb window. The application owns all state;
 /// this host only translates platform input and presents its deterministic frame.
 pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), String> {
+    if !(1..=4).contains(&policy.pixel_density) {
+        return Err("window pixel_density must be between 1 and 4".into());
+    }
     let mut options = WindowOptions {
         resize: policy.resizable,
         ..WindowOptions::default()
@@ -111,10 +118,21 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                 pressed: down,
             });
         }
-        let mut canvas = Canvas::new(window_width as u32, window_height as u32, [0, 0, 0, 255]);
+        let mut canvas = Canvas::new_scaled(
+            window_width as u32,
+            window_height as u32,
+            f32::from(policy.pixel_density),
+            [0, 0, 0, 255],
+        );
         app.frame(&mut canvas, context);
+        let physical_width = canvas.surface().width as usize;
+        let physical_height = canvas.surface().height as usize;
         window
-            .update_with_buffer(&canvas.surface().packed_rgb(), window_width, window_height)
+            .update_with_buffer(
+                &canvas.surface().packed_rgb(),
+                physical_width,
+                physical_height,
+            )
             .map_err(|e| e.to_string())?;
         frame += 1;
     }
