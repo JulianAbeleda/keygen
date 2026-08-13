@@ -339,10 +339,22 @@ impl Canvas {
     }
     pub fn image(&mut self, image: &Image, rect: [f32; 4], fit: ImageFit, opacity: f32) {
         let (x, y, w, h) = (rect[0], rect[1], rect[2], rect[3]);
+        if fit == ImageFit::Stretch {
+            self.surface.draw_image_region_scaled(
+                image,
+                x,
+                y,
+                w,
+                h,
+                opacity,
+                [0, 0, image.width, image.height],
+            );
+            return;
+        }
         let scale = match fit {
-            ImageFit::Stretch => 1.0,
             ImageFit::Contain => (w / image.width as f32).min(h / image.height as f32),
             ImageFit::Cover => (w / image.width as f32).max(h / image.height as f32),
+            ImageFit::Stretch => unreachable!(),
         };
         let dw = image.width as f32 * scale;
         let dh = image.height as f32 * scale;
@@ -440,6 +452,16 @@ mod tests {
         assert!(surface.pixels[0] > surface.pixels[1]);
         let right = ((3 * 4) + 1) as usize;
         assert!(surface.pixels[right] > surface.pixels[right - 1]);
+    }
+
+    #[test]
+    fn canvas_stretch_fills_the_requested_destination() {
+        let source = image(1, 1, vec![220, 10, 30, 255]);
+        let mut canvas = Canvas::new(5, 4, [0, 0, 0, 255]);
+        canvas.image(&source, [1.0, 1.0, 3.0, 2.0], ImageFit::Stretch, 1.0);
+        assert_eq!(canvas.surface().pixels[24..28], [220, 10, 30, 255]);
+        assert_eq!(canvas.surface().pixels[52..56], [220, 10, 30, 255]);
+        assert_eq!(canvas.surface().pixels[0..4], [0, 0, 0, 255]);
     }
 
     #[test]
