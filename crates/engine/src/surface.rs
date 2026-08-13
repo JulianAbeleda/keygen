@@ -661,7 +661,7 @@ impl Canvas {
     /// Radius is capped at 32 logical pixels and the region at three million
     /// physical pixels to keep allocation and runtime predictable.
     pub fn blur_region(&mut self, rect: [f32; 4], radius: u32) {
-        let radius = (radius.min(32) as f32 * self.density).round().min(64.0) as i32;
+        let radius = (radius.min(32) as f32 * self.density).round().min(128.0) as i32;
         if radius == 0 {
             return;
         }
@@ -1041,12 +1041,63 @@ mod tests {
             }
         }
         let before = canvas.surface.pixels.clone();
+        let expected = reference_blur(&before, 9, [2, 1, 5, 4], 2);
         canvas.blur_region([2.0, 1.0, 5.0, 4.0], 2);
-        assert_ne!(canvas.surface.pixels, before);
-        let mut replay = Canvas::new(9, 7, [0, 0, 0, 255]);
-        replay.surface.pixels.copy_from_slice(&before);
-        replay.blur_region([2.0, 1.0, 5.0, 4.0], 2);
-        assert_eq!(canvas.surface.pixels, replay.surface.pixels);
+        assert_eq!(canvas.surface.pixels, expected);
+        for y in 0..7 {
+            for x in 0..9 {
+                if !(1..5).contains(&y) || !(2..7).contains(&x) {
+                    let i = (y * 9 + x) * 4;
+                    assert_eq!(&canvas.surface.pixels[i..i + 4], &before[i..i + 4]);
+                }
+            }
+        }
+
+        let mut scaled = Canvas::new_scaled(8, 8, 2.0, [0, 0, 0, 255]);
+        for (i, p) in scaled.surface.pixels.chunks_exact_mut(4).enumerate() {
+            p.copy_from_slice(&[(i % 251) as u8, (i / 251) as u8, 91, 255]);
+        }
+        let scaled_before = scaled.surface.pixels.clone();
+        let scaled_expected = reference_blur(&scaled_before, 16, [2, 2, 4, 4], 4);
+        scaled.blur_region([1.0, 1.0, 2.0, 2.0], 2);
+        assert_eq!(scaled.surface.pixels, scaled_expected);
+    }
+
+    fn reference_blur(input: &[u8], width: usize, rect: [usize; 4], radius: usize) -> Vec<u8> {
+        let mut out = input.to_vec();
+        let mut horizontal = input.to_vec();
+        let [left, top, rw, rh] = rect;
+        let right = left + rw;
+        let bottom = top + rh;
+        for y in top..bottom {
+            for x in left..right {
+                for c in 0..4 {
+                    let mut sum = 0u32;
+                    for k in 0..radius * 2 + 1 {
+                        let sx = (x as isize + k as isize - radius as isize)
+                            .clamp(left as isize, (right - 1) as isize)
+                            as usize;
+                        sum += u32::from(input[(y * width + sx) * 4 + c]);
+                    }
+                    horizontal[(y * width + x) * 4 + c] = (sum / (radius as u32 * 2 + 1)) as u8;
+                }
+            }
+        }
+        for y in top..bottom {
+            for x in left..right {
+                for c in 0..4 {
+                    let mut sum = 0u32;
+                    for k in 0..radius * 2 + 1 {
+                        let sy = (y as isize + k as isize - radius as isize)
+                            .clamp(top as isize, (bottom - 1) as isize)
+                            as usize;
+                        sum += u32::from(horizontal[(sy * width + x) * 4 + c]);
+                    }
+                    out[(y * width + x) * 4 + c] = (sum / (radius as u32 * 2 + 1)) as u8;
+                }
+            }
+        }
+        out
     }
 
     #[test]
