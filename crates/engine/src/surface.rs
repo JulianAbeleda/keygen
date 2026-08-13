@@ -547,6 +547,62 @@ impl Canvas {
         }
     }
 
+    /// Fills a rectangle while clipping every coverage sample to a rounded
+    /// rectangle. Both rectangles use logical coordinates.
+    pub fn fill_rect_rounded_clip(
+        &mut self,
+        rect: [f32; 4],
+        clip: [f32; 4],
+        clip_radius: f32,
+        color: [u8; 4],
+    ) {
+        if rect[2] <= 0.0
+            || rect[3] <= 0.0
+            || clip[2] <= 0.0
+            || clip[3] <= 0.0
+            || !rect
+                .iter()
+                .chain(clip.iter())
+                .chain(std::iter::once(&clip_radius))
+                .all(|value| value.is_finite())
+        {
+            return;
+        }
+        let s = self.density;
+        let [rx, ry, rw, rh] = rect.map(|value| value * s);
+        let [cx, cy, cw, ch] = clip.map(|value| value * s);
+        let radius = (clip_radius * s).max(0.0).min(cw.min(ch) / 2.0);
+        let min_x = rx.floor().max(cx.floor()).max(0.0) as i32;
+        let min_y = ry.floor().max(cy.floor()).max(0.0) as i32;
+        let max_x = (rx + rw)
+            .ceil()
+            .min((cx + cw).ceil())
+            .min(self.surface.width as f32) as i32;
+        let max_y = (ry + rh)
+            .ceil()
+            .min((cy + ch).ceil())
+            .min(self.surface.height as f32) as i32;
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let mut coverage = 0.0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let qx = px as f32 + (sx as f32 + 0.5) / 4.0;
+                        let qy = py as f32 + (sy as f32 + 0.5) / 4.0;
+                        let in_rect = qx >= rx && qx < rx + rw && qy >= ry && qy < ry + rh;
+                        let in_clip = rounded_distance(qx, qy, cx, cy, cw, ch, radius) <= 0.0;
+                        if in_rect && in_clip {
+                            coverage += 1.0 / 16.0;
+                        }
+                    }
+                }
+                if coverage > 0.0 {
+                    self.surface.blend(px, py, color, coverage);
+                }
+            }
+        }
+    }
+
     fn rounded_shape(
         &mut self,
         [x, y, w, h]: [f32; 4],
@@ -732,6 +788,53 @@ impl Canvas {
                 let ei = (entering * width + col) * 4;
                 for (c, value) in sum.iter_mut().enumerate() {
                     *value = *value + u32::from(horizontal[ei + c]) - u32::from(horizontal[li + c]);
+                }
+            }
+        }
+    }
+
+    /// Applies the bounded blur while preserving every pixel outside a
+    /// rounded clip. This matches a rounded backdrop-filter surface without
+    /// leaking a rectangular blur at its corners.
+    pub fn blur_region_rounded(&mut self, rect: [f32; 4], corner_radius: f32, blur_radius: u32) {
+        if rect[2] <= 0.0
+            || rect[3] <= 0.0
+            || !rect
+                .iter()
+                .chain(std::iter::once(&corner_radius))
+                .all(|value| value.is_finite())
+        {
+            return;
+        }
+        let before = self.surface.pixels.clone();
+        self.blur_region(rect, blur_radius);
+        let s = self.density;
+        let [x, y, w, h] = rect.map(|value| value * s);
+        let radius = (corner_radius * s).max(0.0).min(w.min(h) / 2.0);
+        let min_x = x.floor().max(0.0) as i32;
+        let min_y = y.floor().max(0.0) as i32;
+        let max_x = (x + w).ceil().min(self.surface.width as f32) as i32;
+        let max_y = (y + h).ceil().min(self.surface.height as f32) as i32;
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let mut coverage = 0u16;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let qx = px as f32 + (sx as f32 + 0.5) / 4.0;
+                        let qy = py as f32 + (sy as f32 + 0.5) / 4.0;
+                        if rounded_distance(qx, qy, x, y, w, h, radius) <= 0.0 {
+                            coverage += 1;
+                        }
+                    }
+                }
+                if coverage < 16 {
+                    let offset = ((py as u32 * self.surface.width + px as u32) * 4) as usize;
+                    for channel in 0..4 {
+                        let original = u16::from(before[offset + channel]);
+                        let blurred = u16::from(self.surface.pixels[offset + channel]);
+                        self.surface.pixels[offset + channel] =
+                            ((original * (16 - coverage) + blurred * coverage + 8) / 16) as u8;
+                    }
                 }
             }
         }
@@ -1029,6 +1132,30 @@ mod tests {
         assert_eq!(red(10, 3), 255);
         assert_eq!(red(4, 9), 255);
         assert_eq!(red(20, 12), 255);
+    }
+
+    #[test]
+    fn rounded_clip_keeps_fill_and_blur_inside_the_same_corner_mask() {
+        let mut fill = Canvas::new(24, 18, [0, 0, 0, 255]);
+        fill.fill_rect_rounded_clip(
+            [2.0, 2.0, 5.0, 12.0],
+            [2.0, 2.0, 18.0, 12.0],
+            5.0,
+            [255, 0, 0, 255],
+        );
+        let at = |canvas: &Canvas, x: usize, y: usize| canvas.surface().pixels[(y * 24 + x) * 4];
+        assert_eq!(at(&fill, 2, 2), 0);
+        assert_eq!(at(&fill, 2, 13), 0);
+        assert_eq!(at(&fill, 2, 7), 255);
+
+        let mut blur = Canvas::new(24, 18, [0, 0, 0, 255]);
+        blur.fill_rect([2.0, 2.0, 18.0, 12.0], [255, 255, 255, 255]);
+        let corners_before = [at(&blur, 2, 2), at(&blur, 19, 2), at(&blur, 2, 13)];
+        blur.blur_region_rounded([2.0, 2.0, 18.0, 12.0], 5.0, 3);
+        assert_eq!(
+            [at(&blur, 2, 2), at(&blur, 19, 2), at(&blur, 2, 13)],
+            corners_before
+        );
     }
 
     #[test]
