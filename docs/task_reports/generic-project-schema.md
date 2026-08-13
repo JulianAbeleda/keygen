@@ -2,7 +2,7 @@
 
 KeyGen now exposes `keygen_engine::project::ProjectManifest` (`keygen.project.v1`).
 It is an editor-free, title-neutral package contract for project identity, viewport,
-content-addressed logical assets, scenes, story entry labels, and persistence
+content-addressed logical assets, scenes, explicit launcher routes, story entry labels, and persistence
 namespace. Hosts can load JSON from bytes or a path and receive deterministic
 validation for duplicate IDs, missing scene assets, malformed hashes, and invalid
 story entry points.

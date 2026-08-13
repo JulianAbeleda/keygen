@@ -14,3 +14,8 @@ The result is `dist/macos/my_target.app`: an arm64 executable, `Info.plist`,
 optional resources, and a SHA-256 package manifest. It requires Apple Silicon
 macOS and refuses malformed identifiers. `kg_ddlc_plus` remains an adapter;
 its identity, importer, story descriptors, and assets are package-owned.
+
+Finder/LaunchServices starts the executable without arguments. The package
+contract therefore reserves `Resources/package/project.json` and
+`Resources/package/scenes/boot.json` as the canonical no-argument launch path;
+the generic binary validates that manifest before opening the scene.

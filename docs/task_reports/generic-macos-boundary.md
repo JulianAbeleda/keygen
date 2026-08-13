@@ -11,3 +11,9 @@ changing the KeyGen host contract.
 Validation is fail-closed for non-macOS, non-arm64 hosts and malformed target or
 bundle identifiers. Resource ownership remains with the adapter and the bundle
 manifest records hashes rather than source provenance or absolute paths.
+
+The packaged executable also has a deterministic Finder launch path: with no
+argv it discovers the adjacent generic project manifest and `scenes/boot.json`,
+validates the project, and enters the native scene window. This keeps the app
+launch contract independent of a shell, browser, editor, or title-specific
+wrapper.

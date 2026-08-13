@@ -28,6 +28,14 @@ app="$out/$target.app"; contents="$app/Contents"
 rm -rf "$app"; mkdir -p "$contents/MacOS" "$contents/Resources"
 cp "$binary" "$contents/MacOS/$target"; chmod 755 "$contents/MacOS/$target"
 [ -z "$resources" ] || { [ -d "$resources" ] || exit 1; cp -R "$resources" "$contents/Resources/package"; }
+# Finder launches provide no scene argument.  Every packaged project therefore
+# gets a deterministic boot alias while retaining its original scene files.
+# A project may provide an explicit boot.json; otherwise the first scene is
+# copied beside it so relative asset paths remain valid.
+if [ -d "$contents/Resources/package/scenes" ] && [ ! -f "$contents/Resources/package/scenes/boot.json" ]; then
+  first_scene=$(find "$contents/Resources/package/scenes" -maxdepth 1 -type f -name '*.json' ! -name 'boot.json' -print | sort | head -n 1)
+  [ -z "$first_scene" ] || cp "$first_scene" "$contents/Resources/package/scenes/boot.json"
+fi
 python3 - "$app" "$target" "$display_name" "$bundle_id" "$version" "$min_os" <<'PY'
 import hashlib,json,pathlib,sys
 root=pathlib.Path(sys.argv[1]); c=root/'Contents'; target,name,bundle,version,min_os=sys.argv[2:]

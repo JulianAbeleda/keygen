@@ -16,6 +16,11 @@ pub struct ProjectManifest {
     pub assets: Vec<ProjectAsset>,
     #[serde(default)]
     pub scenes: Vec<ProjectScene>,
+    /// Launcher routes are the title-neutral handoff between a visible scene
+    /// and an optional story label.  Keeping this in the package manifest
+    /// means hosts do not have to infer navigation from filenames.
+    #[serde(default)]
+    pub routes: Vec<ProjectRoute>,
     #[serde(default)]
     pub story: Option<ProjectStory>,
     #[serde(default)]
@@ -48,6 +53,14 @@ pub struct ProjectScene {
     pub id: String,
     #[serde(default)]
     pub asset_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRoute {
+    pub id: String,
+    pub scene: String,
+    #[serde(default)]
+    pub story_entry: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +138,32 @@ impl ProjectManifest {
                 }
             }
         }
+        let scene_ids: BTreeSet<&str> = self.scenes.iter().map(|s| s.id.as_str()).collect();
+        let story_labels: BTreeSet<&str> = self
+            .story
+            .as_ref()
+            .map(|story| story.labels.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let mut route_ids = BTreeSet::new();
+        for route in &self.routes {
+            if route.id.trim().is_empty() || !route_ids.insert(route.id.as_str()) {
+                return Err(format!("duplicate or empty route id: {}", route.id));
+            }
+            if !scene_ids.contains(route.scene.as_str()) {
+                return Err(format!(
+                    "route {} references missing scene {}",
+                    route.id, route.scene
+                ));
+            }
+            if let Some(entry) = &route.story_entry {
+                if story_labels.is_empty() || !story_labels.contains(entry.as_str()) {
+                    return Err(format!(
+                        "route {} references missing story entry {entry}",
+                        route.id
+                    ));
+                }
+            }
+        }
         if let Some(story) = &self.story {
             if story.entry.is_empty() || !story.labels.iter().any(|l| l == &story.entry) {
                 return Err("story entry label is missing".into());
@@ -163,6 +202,11 @@ mod tests {
                 id: "scene.start".into(),
                 asset_ids: vec!["sprite.hero".into()],
             }],
+            routes: vec![ProjectRoute {
+                id: "route.start".into(),
+                scene: "scene.start".into(),
+                story_entry: Some("start".into()),
+            }],
             story: Some(ProjectStory {
                 entry: "start".into(),
                 labels: vec!["start".into()],
@@ -180,6 +224,16 @@ mod tests {
     fn missing_asset_is_rejected() {
         let mut p = fixture();
         p.scenes[0].asset_ids.push("missing".into());
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn route_must_resolve_scene_and_story_entry() {
+        let mut p = fixture();
+        p.routes[0].scene = "scene.missing".into();
+        assert!(p.validate().is_err());
+        p.routes[0].scene = "scene.start".into();
+        p.routes[0].story_entry = Some("missing".into());
         assert!(p.validate().is_err());
     }
 }

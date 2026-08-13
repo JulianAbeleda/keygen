@@ -68,11 +68,38 @@ def build(source: Path, output: Path, limit: int, max_bytes: int) -> dict:
     for record in records: grouped.setdefault(category(record), []).append(record["logical_id"])
     for name, ids in sorted(grouped.items()):
         (scenes_dir / f"{name}.json").write_text(json.dumps({"schema":"keygen.scene.v1", "id":f"scene.{name}", "asset_ids":ids, "design_width":1920, "design_height":1080}, indent=2, sort_keys=True) + "\n")
+    # A packaged application needs one concrete, renderable boot scene.  Keep
+    # this generic: prefer the recovered DOS font/logo when present, but never
+    # assume a title-specific asset exists.  The scene itself references only
+    # copied package-relative bytes.
+    font = next((a for a, r in zip(assets, records) if r["kind"] == "font"), None)
+    logo = next((a for a, r in zip(assets, records)
+                 if r["kind"] == "image" and "logo" in r["source_path"].lower()), None)
+    if font is None:
+        font = next((a for a in assets if a["kind"] == "font"), None)
+    boot = {
+        "schema": "keygen.scene.v1", "title": "KeyGen", "design_width": 1920,
+        "design_height": 1080, "clear": [8, 10, 16, 255],
+        "font_path": f"../{font['logical_path']}" if font else "",
+        "layers": [], "particle_insertions": [], "menu_insertion": None,
+        "menu": None, "text_layers": [{"id": "boot-status", "text": "KEYGEN BOOT",
+        "x": 64.0, "y": 64.0, "font_size": 32.0, "color": [220, 230, 245, 255],
+        "outline": [0, 0, 0, 255], "outline_width": 1, "visible_at": 0.0,
+        "characters_per_second": None}], "particles": None, "fade": None,
+    }
+    if logo:
+        boot["layers"].append({"id": "boot-logo", "path": f"../{logo['logical_path']}",
+                                "x": 960.0, "y": 420.0, "scale": 1.0,
+                                "anchor": "center", "alpha": 1.0, "entrance": None,
+                                "motion": None})
+    (scenes_dir / "boot.json").write_text(json.dumps(boot, indent=2, sort_keys=True) + "\n")
     text_paths = [source / r["source_path"] for r in records if r["kind"] == "text"]
     story = output / "story.json"
     subprocess.run([sys.executable, str(IMPORT), *map(str, text_paths), "--output", str(story), "--limit", str(limit)], cwd=ROOT, check=True)
     labels = ["start"] + [f"category.{name}" for name in sorted(grouped)]
-    project = {"schema":"keygen.project.v1", "project":{"id":"keygen.private.full-content", "display_name":"KeyGen private content package", "version":"0.1.0"}, "viewport":{"width":1920,"height":1080}, "assets":assets, "scenes":[{"id":f"scene.{name}","asset_ids":ids} for name,ids in sorted(grouped.items())], "story":{"entry":"start","labels":labels}, "persistence":{"namespace":"keygen.private.full-content","schema":"keygen.project.state.v1"}}
+    scenes = [{"id":f"scene.{name}","asset_ids":ids} for name,ids in sorted(grouped.items())]
+    routes = [{"id":f"route.{name}","scene":f"scene.{name}","story_entry":f"category.{name}"} for name in sorted(grouped)]
+    project = {"schema":"keygen.project.v1", "project":{"id":"keygen.private.full-content", "display_name":"KeyGen private content package", "version":"0.1.0"}, "viewport":{"width":1920,"height":1080}, "assets":assets, "scenes":scenes, "routes":routes, "story":{"entry":"start","labels":labels}, "persistence":{"namespace":"keygen.private.full-content","schema":"keygen.project.state.v1"}}
     (output / "project.json").write_text(json.dumps(project, indent=2, sort_keys=True) + "\n")
     routes = {"schema":"keygen.launcher.routes.v1", "entry":"scene.text", "routes":[{"id":f"route.{name}","scene":f"scene.{name}","asset_count":len(ids)} for name,ids in sorted(grouped.items())], "story":"story.json"}
     (output / "routes.json").write_text(json.dumps(routes, indent=2, sort_keys=True) + "\n")

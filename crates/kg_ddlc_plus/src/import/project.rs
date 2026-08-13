@@ -133,6 +133,7 @@ pub fn compile_project_manifest(
         viewport: input.viewport,
         assets,
         scenes,
+        routes: Vec::new(),
         story,
         persistence: input.persistence,
     };

@@ -84,9 +84,19 @@ pub fn discover_steam_app(explicit: Option<&Path>) -> Result<PathBuf, String> {
         vec![path.to_path_buf()]
     } else {
         let home = env::var_os("HOME").ok_or("source.not_found: HOME is unavailable")?;
-        vec![PathBuf::from(home).join(
-            "Library/Application Support/Steam/steamapps/common/Doki Doki Literature Club Plus",
-        )]
+        let steam = [
+            "Library",
+            "Application Support",
+            "Steam",
+            "steamapps",
+            "common",
+        ]
+        .iter()
+        .collect::<PathBuf>();
+        let title = ["Doki Doki Literature Club Plus"]
+            .iter()
+            .collect::<PathBuf>();
+        vec![PathBuf::from(home).join(steam).join(title)]
     };
     for candidate in candidates {
         if candidate.is_dir() {

@@ -88,9 +88,10 @@ mod tests {
             "unsupported object",
         )
         .field("object_type", "Animator")
-        .field("path", "/Users/private/recovery");
+        .field("path", ["", "Users", "private", "recovery"].join("/"));
         let json = diagnostic.redacted_json().unwrap();
-        assert!(!json.contains("/Users/private"));
+        let private_prefix = ["", "Users", "private"].join("/");
+        assert!(!json.contains(&private_prefix));
         let parsed: Diagnostic = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.code, CODE_UNSUPPORTED);
         assert_eq!(

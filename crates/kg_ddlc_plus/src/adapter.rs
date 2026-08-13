@@ -51,6 +51,7 @@ mod tests {
             },
             assets: vec![],
             scenes: vec![],
+            routes: vec![],
             story: None,
             persistence: PersistenceConfig::default(),
         }

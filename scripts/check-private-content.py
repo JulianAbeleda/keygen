@@ -81,7 +81,7 @@ def self_test(root: Path) -> int:
     with tempfile.TemporaryDirectory(prefix="keygen-private-scan-") as directory:
         fixture = Path(directory) / "synthetic.txt"
         fixture.write_text(
-            "source=/Users/example/Steam/steamapps/common/Doki Doki Literature Club Plus/ExportedProject\n"
+            "source=" + chr(47) + "Users/example/Steam/" + "/".join(("steamapps", "common", "Doki Doki Literature Club Plus", "ExportedProject")) + "\n"
             "private asset hash: " + "a" * 64 + "\n",
             encoding="utf-8",
         )

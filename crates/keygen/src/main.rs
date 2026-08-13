@@ -19,7 +19,7 @@ fn main() {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let Some(command) = args.first().map(String::as_str) else {
-        return Err(usage().into());
+        return launch_packaged_app();
     };
     if command.starts_with('-') {
         // Keep the original scene CLI exactly available while the generic
@@ -43,6 +43,45 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "help" | "--help" | "-h" => Err(usage().into()),
         other => Err(format!("unknown command: {other}")),
     }
+}
+
+/// Launch the canonical scene when Finder/LaunchServices starts a packaged
+/// application without command-line arguments.  The bundle layout is part of
+/// the generic KeyGen contract; it does not encode any particular game.
+fn launch_packaged_app() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("cannot locate KeyGen executable: {error}"))?;
+    let macos_dir = executable
+        .parent()
+        .ok_or("KeyGen executable has no parent directory")?;
+    let contents = macos_dir
+        .parent()
+        .ok_or("KeyGen executable is not inside an app bundle")?;
+    if contents.file_name().and_then(|name| name.to_str()) != Some("Contents") {
+        return Err(
+            "no command supplied; run KeyGen inside a .app bundle or use `keygen --scene FILE`"
+                .into(),
+        );
+    }
+    let package = contents.join("Resources").join("package");
+    let project = package.join("project.json");
+    let scene = package.join("scenes").join("boot.json");
+    if !project.is_file() {
+        return Err(format!("packaged app is missing {}", project.display()));
+    }
+    if !scene.is_file() {
+        return Err(format!(
+            "packaged app is missing canonical boot scene {}",
+            scene.display()
+        ));
+    }
+    let manifest = ProjectManifest::load(&project)?;
+    manifest.validate()?;
+    keygen_player::run_cli([
+        "keygen".to_owned(),
+        "--scene".to_owned(),
+        scene.to_string_lossy().into_owned(),
+    ])
 }
 
 fn e2e_project(args: &[String]) -> Result<(), String> {
