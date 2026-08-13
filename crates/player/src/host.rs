@@ -35,6 +35,11 @@ pub struct HostContext {
 pub trait Application {
     fn frame(&mut self, canvas: &mut Canvas, context: HostContext);
     fn event(&mut self, _event: HostEvent) {}
+    /// Return false when the previously presented buffer remains valid. The
+    /// host will continue polling native events without rerasterizing it.
+    fn needs_redraw(&self) -> bool {
+        true
+    }
     fn should_close(&self) -> bool {
         false
     }
@@ -91,6 +96,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let started = Instant::now();
     let mut previous = started;
     let mut frame = 0;
+    let mut previous_pointer = None;
     while window.is_open() && !app.should_close() {
         let now = Instant::now();
         let delta = now.duration_since(previous);
@@ -119,29 +125,37 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
         }
         if let Some((x, y)) = window.get_mouse_pos(MouseMode::Clamp) {
             let down = window.get_mouse_down(MouseButton::Left);
-            app.event(HostEvent::Pointer {
-                x,
-                y,
-                button: Some(MouseButton::Left),
-                pressed: down,
-            });
+            let pointer = (x, y, down);
+            if previous_pointer != Some(pointer) {
+                app.event(HostEvent::Pointer {
+                    x,
+                    y,
+                    button: Some(MouseButton::Left),
+                    pressed: down,
+                });
+                previous_pointer = Some(pointer);
+            }
         }
-        let mut canvas = Canvas::new_scaled(
-            window_width as u32,
-            window_height as u32,
-            f32::from(policy.pixel_density),
-            [0, 0, 0, 255],
-        );
-        app.frame(&mut canvas, context);
-        let physical_width = canvas.surface().width as usize;
-        let physical_height = canvas.surface().height as usize;
-        window
-            .update_with_buffer(
-                &canvas.surface().packed_rgb(),
-                physical_width,
-                physical_height,
-            )
-            .map_err(|e| e.to_string())?;
+        if frame == 0 || app.needs_redraw() {
+            let mut canvas = Canvas::new_scaled(
+                window_width as u32,
+                window_height as u32,
+                f32::from(policy.pixel_density),
+                [0, 0, 0, 255],
+            );
+            app.frame(&mut canvas, context);
+            let physical_width = canvas.surface().width as usize;
+            let physical_height = canvas.surface().height as usize;
+            window
+                .update_with_buffer(
+                    &canvas.surface().packed_rgb(),
+                    physical_width,
+                    physical_height,
+                )
+                .map_err(|e| e.to_string())?;
+        } else {
+            window.update();
+        }
         frame += 1;
     }
     app.event(HostEvent::Close);
