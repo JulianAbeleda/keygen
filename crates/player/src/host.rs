@@ -161,18 +161,16 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
             height: window_height,
         };
         app.event(HostEvent::Tick(delta));
-        for key in window.get_keys_pressed(KeyRepeat::Yes) {
-            app.event(HostEvent::Key {
-                key,
-                pressed: true,
-                modifiers: modifiers(&window),
-            });
-        }
-        for codepoint in text.borrow_mut().drain(..) {
-            if let Some(character) = char::from_u32(codepoint) {
-                app.event(HostEvent::Text(character));
-            }
-        }
+        // macOS may deliver committed text and Return during the same host
+        // frame. Apply the text callback first so Return submits the complete
+        // Composer value instead of observing the previous frame's text.
+        let committed_text = text.borrow_mut().drain(..).collect::<Vec<_>>();
+        let pressed_keys = window
+            .get_keys_pressed(KeyRepeat::Yes)
+            .into_iter()
+            .map(|key| (key, modifiers(&window)))
+            .collect::<Vec<_>>();
+        dispatch_frame_input(&mut app, committed_text, pressed_keys);
         for key in window.get_keys_released() {
             app.event(HostEvent::Key {
                 key,
@@ -258,6 +256,25 @@ impl InputCallback for TextCollector {
     }
 }
 
+fn dispatch_frame_input<A: Application>(
+    app: &mut A,
+    text: impl IntoIterator<Item = u32>,
+    keys: impl IntoIterator<Item = (Key, Modifiers)>,
+) {
+    for codepoint in text {
+        if let Some(character) = char::from_u32(codepoint) {
+            app.event(HostEvent::Text(character));
+        }
+    }
+    for (key, modifiers) in keys {
+        app.event(HostEvent::Key {
+            key,
+            pressed: true,
+            modifiers,
+        });
+    }
+}
+
 /// Render one dynamic frame without opening a window, useful for tests and captures.
 pub fn render_frame<A: Application>(
     app: &mut A,
@@ -328,6 +345,37 @@ mod tests {
         fn frame(&mut self, canvas: &mut Canvas, _context: HostContext) {
             canvas.clear([255, 0, 0, 255]);
         }
+    }
+
+    #[derive(Default)]
+    struct EventRecorder(Vec<HostEvent>);
+    impl Application for EventRecorder {
+        fn frame(&mut self, _canvas: &mut Canvas, _context: HostContext) {}
+        fn event(&mut self, event: HostEvent) {
+            self.0.push(event);
+        }
+    }
+
+    #[test]
+    fn committed_text_precedes_action_keys_from_the_same_host_frame() {
+        let mut recorder = EventRecorder::default();
+        dispatch_frame_input(
+            &mut recorder,
+            ['O' as u32, 'K' as u32],
+            [(Key::Enter, Modifiers::default())],
+        );
+        assert_eq!(
+            recorder.0,
+            [
+                HostEvent::Text('O'),
+                HostEvent::Text('K'),
+                HostEvent::Key {
+                    key: Key::Enter,
+                    pressed: true,
+                    modifiers: Modifiers::default(),
+                },
+            ]
+        );
     }
 
     #[test]
