@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 //! Filesystem loading and native presentation for KeyGen scenes.
 
-use keygen_engine::{model::SceneSpec, Scene, SceneAssets};
+use keygen_engine::{
+    model::SceneSpec, project::ProjectManifest, runtime::ProjectRouteNavigator, Scene, SceneAssets,
+};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, ScaleMode, Window, WindowOptions};
 use std::{
     collections::HashMap,
@@ -163,10 +165,23 @@ fn run(args: Args) -> Result<(), String> {
         println!("rendered {}", output.display());
         return Ok(());
     }
-    run_window(scene, args.smoke_seconds)
+    let navigator = packaged_navigator(&args.scene);
+    run_window(scene, args.smoke_seconds, navigator)
 }
 
-fn run_window(scene: Scene, smoke_seconds: Option<f32>) -> Result<(), String> {
+fn packaged_navigator(scene: &Path) -> Option<ProjectRouteNavigator> {
+    let package = scene.parent()?.parent()?;
+    let project = package.join("project.json");
+    ProjectManifest::load(project)
+        .ok()
+        .and_then(|manifest| ProjectRouteNavigator::new(manifest).ok())
+}
+
+fn run_window(
+    scene: Scene,
+    smoke_seconds: Option<f32>,
+    mut navigator: Option<ProjectRouteNavigator>,
+) -> Result<(), String> {
     native::require_supported_host()?;
     let width = scene.spec.design_width as usize;
     let height = scene.spec.design_height as usize;
@@ -186,12 +201,18 @@ fn run_window(scene: Scene, smoke_seconds: Option<f32>) -> Result<(), String> {
     let mut focused = first_enabled(&scene, 0);
     let mut mouse_was_down = false;
     let mut pressed_entry = None;
+    if let Some(router) = navigator.as_mut() {
+        router.advance_boot();
+    }
     while window.is_open() {
         let elapsed = start.elapsed().as_secs_f32();
         if smoke_seconds.is_some_and(|seconds| elapsed >= seconds) {
             break;
         }
         if window.is_key_pressed(Key::Escape, KeyRepeat::No) {
+            if let Some(router) = navigator.as_mut() {
+                router.close();
+            }
             break;
         }
         if window.is_key_pressed(Key::Down, KeyRepeat::Yes) {
@@ -234,7 +255,16 @@ fn run_window(scene: Scene, smoke_seconds: Option<f32>) -> Result<(), String> {
             {
                 println!("menu action: {}", entry.id);
                 if entry.id == "exit" {
+                    if let Some(router) = navigator.as_mut() {
+                        router.close();
+                    }
                     break;
+                }
+                if let Some(router) = navigator.as_mut() {
+                    match router.activate(&entry.id) {
+                        Ok(route) => println!("route transition: {route:?}"),
+                        Err(error) => println!("route unavailable for {}: {error}", entry.id),
+                    }
                 }
             }
         }
