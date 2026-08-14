@@ -340,6 +340,29 @@ impl Canvas {
             density,
         }
     }
+    /// Wrap an existing physical surface with explicit logical dimensions.
+    /// This enables cache updates without allocating and copying a full frame.
+    pub fn from_surface_scaled(
+        surface: Surface,
+        logical_width: u32,
+        logical_height: u32,
+        density: f32,
+    ) -> Self {
+        debug_assert_eq!(
+            surface.width,
+            (logical_width as f32 * density).round() as u32
+        );
+        debug_assert_eq!(
+            surface.height,
+            (logical_height as f32 * density).round() as u32
+        );
+        Self {
+            surface,
+            logical_width,
+            logical_height,
+            density,
+        }
+    }
     pub fn width(&self) -> u32 {
         self.logical_width
     }
