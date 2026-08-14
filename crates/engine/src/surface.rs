@@ -41,10 +41,16 @@ impl Default for FillOptions {
 
 impl Surface {
     pub fn new(width: u32, height: u32, color: [u8; 4]) -> Self {
-        let mut pixels = vec![0; width as usize * height as usize * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&color);
-        }
+        let length = width as usize * height as usize * 4;
+        let pixels = if color == [0, 0, 0, 0] {
+            vec![0; length]
+        } else {
+            let mut pixels = vec![0; length];
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.copy_from_slice(&color);
+            }
+            pixels
+        };
         Self {
             width,
             height,
