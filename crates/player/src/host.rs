@@ -23,7 +23,10 @@ pub enum HostEvent {
         pressed: bool,
     },
     Scroll {
-        delta: i32,
+        /// Native vertical scroll delta. Fractional values are preserved so
+        /// product code can distinguish a gentle trackpad movement from a
+        /// coarse or accelerated wheel event.
+        delta: f32,
     },
     Tick(Duration),
     Close,
@@ -39,18 +42,14 @@ pub struct Modifiers {
     pub super_key: bool,
 }
 
-/// Convert a native vertical wheel delta into a bounded, discrete event.
-/// Invalid and zero values are ignored.
-pub(crate) fn normalize_scroll_delta(value: f32) -> Option<i32> {
+/// Sanitize a native vertical wheel delta without destroying its precision.
+/// Invalid and zero values are ignored and pathological magnitudes are
+/// bounded before crossing the generic host boundary.
+pub(crate) fn normalize_scroll_delta(value: f32) -> Option<f32> {
     if !value.is_finite() || value == 0.0 {
         return None;
     }
-    let magnitude = value.abs().round().clamp(1.0, 32.0) as i32;
-    Some(if value.is_sign_negative() {
-        -magnitude
-    } else {
-        magnitude
-    })
+    Some(value.clamp(-32.0, 32.0))
 }
 
 #[derive(Clone, Debug)]
@@ -505,13 +504,13 @@ mod tests {
     }
 
     #[test]
-    fn scroll_normalization_rounds_preserves_sign_and_clamps() {
-        assert_eq!(normalize_scroll_delta(0.1), Some(1));
-        assert_eq!(normalize_scroll_delta(-0.1), Some(-1));
-        assert_eq!(normalize_scroll_delta(1.6), Some(2));
-        assert_eq!(normalize_scroll_delta(-1.6), Some(-2));
-        assert_eq!(normalize_scroll_delta(100.0), Some(32));
-        assert_eq!(normalize_scroll_delta(-100.0), Some(-32));
+    fn scroll_normalization_preserves_fraction_sign_and_clamps() {
+        assert_eq!(normalize_scroll_delta(0.1), Some(0.1));
+        assert_eq!(normalize_scroll_delta(-0.1), Some(-0.1));
+        assert_eq!(normalize_scroll_delta(1.6), Some(1.6));
+        assert_eq!(normalize_scroll_delta(-1.6), Some(-1.6));
+        assert_eq!(normalize_scroll_delta(100.0), Some(32.0));
+        assert_eq!(normalize_scroll_delta(-100.0), Some(-32.0));
     }
 
     #[test]
@@ -540,8 +539,8 @@ mod tests {
             }
         );
         assert_eq!(
-            HostEvent::Scroll { delta: -3 },
-            HostEvent::Scroll { delta: -3 }
+            HostEvent::Scroll { delta: -3.0 },
+            HostEvent::Scroll { delta: -3.0 }
         );
     }
 }
