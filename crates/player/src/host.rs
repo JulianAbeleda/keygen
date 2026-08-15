@@ -61,6 +61,14 @@ pub struct HostContext {
     pub height: usize,
 }
 
+/// A bounded application request applied by the native host between frames.
+/// Product state and labels remain application-owned; the host only manages
+/// generic window lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowRequest {
+    Resize { width: usize, height: usize },
+}
+
 pub trait Application {
     fn frame(&mut self, canvas: &mut Canvas, context: HostContext);
     fn event(&mut self, _event: HostEvent) {}
@@ -71,6 +79,11 @@ pub trait Application {
     }
     fn should_close(&self) -> bool {
         false
+    }
+    /// Consume a pending native-window request. The default keeps existing
+    /// applications source-compatible and window-static.
+    fn take_window_request(&mut self) -> Option<WindowRequest> {
+        None
     }
 }
 
@@ -129,18 +142,9 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
         return Err("window target_fps must be between 1 and 240".into());
     }
     policy.physical_size()?;
-    let mut options = WindowOptions {
-        resize: policy.resizable,
-        ..WindowOptions::default()
-    };
-    options.borderless = policy.fullscreen;
-    let mut window = Window::new(&policy.title, policy.width, policy.height, options)
-        .map_err(|e| e.to_string())?;
-    window.set_target_fps(policy.target_fps);
     let pending_input = Rc::new(RefCell::new(PendingInput::default()));
-    window.set_input_callback(Box::new(InputCollector {
-        pending: pending_input.clone(),
-    }));
+    let mut active_policy = policy;
+    let mut window = create_window(&active_policy, pending_input.clone())?;
     let started = Instant::now();
     let mut previous = started;
     let mut frame = 0;
@@ -205,11 +209,22 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                 previous_left_down = down;
             }
         }
+        if let Some(request) = app.take_window_request() {
+            let WindowRequest::Resize { width, height } = request;
+            validate_window_size(width, height)?;
+            active_policy.width = width;
+            active_policy.height = height;
+            window = create_window(&active_policy, pending_input.clone())?;
+            previous_pointer = None;
+            previous_left_down = false;
+            presented_frames.clear();
+            continue;
+        }
         if frame == 0 || app.needs_redraw() {
             let mut canvas = Canvas::new_scaled(
                 window_width as u32,
                 window_height as u32,
-                f32::from(policy.pixel_density),
+                f32::from(active_policy.pixel_density),
                 [0, 0, 0, 255],
             );
             app.frame(&mut canvas, context);
@@ -235,6 +250,33 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     }
     app.event(HostEvent::Close);
     Ok(())
+}
+
+fn validate_window_size(width: usize, height: usize) -> Result<(), String> {
+    if !(320..=4096).contains(&width) || !(240..=4096).contains(&height) {
+        return Err("requested window size must be within 320x240 and 4096x4096".into());
+    }
+    Ok(())
+}
+
+fn create_window(
+    policy: &WindowPolicy,
+    pending_input: Rc<RefCell<PendingInput>>,
+) -> Result<Window, String> {
+    validate_window_size(policy.width, policy.height)?;
+    policy.physical_size()?;
+    let mut options = WindowOptions {
+        resize: policy.resizable,
+        ..WindowOptions::default()
+    };
+    options.borderless = policy.fullscreen;
+    let mut window = Window::new(&policy.title, policy.width, policy.height, options)
+        .map_err(|error| error.to_string())?;
+    window.set_target_fps(policy.target_fps);
+    window.set_input_callback(Box::new(InputCollector {
+        pending: pending_input,
+    }));
+    Ok(window)
 }
 
 fn modifiers(window: &Window) -> Modifiers {
@@ -433,6 +475,25 @@ mod tests {
             ..WindowPolicy::default()
         };
         assert!(policy.physical_size().is_err());
+    }
+
+    #[test]
+    fn runtime_window_requests_are_bounded_and_product_neutral() {
+        assert_eq!(validate_window_size(720, 640), Ok(()));
+        assert_eq!(validate_window_size(1600, 900), Ok(()));
+        assert!(validate_window_size(319, 640).is_err());
+        assert!(validate_window_size(720, 239).is_err());
+        assert!(validate_window_size(4097, 900).is_err());
+        assert_eq!(
+            WindowRequest::Resize {
+                width: 1600,
+                height: 900
+            },
+            WindowRequest::Resize {
+                width: 1600,
+                height: 900
+            }
+        );
     }
 
     #[test]
