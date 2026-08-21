@@ -49,7 +49,7 @@ pub fn set_window_bounds(
         if !result.status.success() {
             return Err("native window bounds request was refused".into());
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
