@@ -65,7 +65,17 @@ pub struct HostContext {
 /// generic window lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowRequest {
-    Resize { width: usize, height: usize },
+    Resize {
+        width: usize,
+        height: usize,
+    },
+    /// Move and resize the existing native window without recreating it.
+    Bounds {
+        x: i32,
+        y: i32,
+        width: usize,
+        height: usize,
+    },
 }
 
 pub trait Application {
@@ -99,6 +109,24 @@ pub struct WindowPolicy {
     pub resizable: bool,
     pub fullscreen: bool,
     pub title: String,
+}
+
+const MIN_WINDOW_WIDTH: usize = 320;
+const MIN_WINDOW_HEIGHT: usize = 240;
+const MAX_WINDOW_DIMENSION: usize = 4096;
+
+fn clamp_window_bounds(
+    x: i32,
+    y: i32,
+    width: usize,
+    height: usize,
+) -> Result<(i32, i32, usize, usize), String> {
+    let width = width.clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_DIMENSION);
+    let height = height.clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_DIMENSION);
+    if x == i32::MIN || y == i32::MIN {
+        return Err("window bounds position is invalid".into());
+    }
+    Ok((x, y, width, height))
 }
 
 impl WindowPolicy {
@@ -209,14 +237,28 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
             }
         }
         if let Some(request) = app.take_window_request() {
-            let WindowRequest::Resize { width, height } = request;
-            validate_window_size(width, height)?;
-            active_policy.width = width;
-            active_policy.height = height;
-            window = create_window(&active_policy, pending_input.clone())?;
-            previous_pointer = None;
-            previous_left_down = false;
-            presented_frames.clear();
+            match request {
+                WindowRequest::Resize { width, height } => {
+                    let (_, _, width, height) = clamp_window_bounds(0, 0, width, height)?;
+                    active_policy.width = width;
+                    active_policy.height = height;
+                    apply_window_bounds(&active_policy.title, 0, 0, width, height)?;
+                }
+                WindowRequest::Bounds {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let (x, y, width, height) = clamp_window_bounds(x, y, width, height)?;
+                    active_policy.width = width;
+                    active_policy.height = height;
+                    apply_window_bounds(&active_policy.title, x, y, width, height)?;
+                }
+            }
+            // The native window, callback, focus, input composition, and
+            // presentation queue remain alive across the request. The next
+            // frame observes the platform's new drawable size.
             continue;
         }
         if frame == 0 || app.needs_redraw() {
@@ -252,10 +294,22 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
 }
 
 fn validate_window_size(width: usize, height: usize) -> Result<(), String> {
-    if !(320..=4096).contains(&width) || !(240..=4096).contains(&height) {
+    if !(MIN_WINDOW_WIDTH..=MAX_WINDOW_DIMENSION).contains(&width)
+        || !(MIN_WINDOW_HEIGHT..=MAX_WINDOW_DIMENSION).contains(&height)
+    {
         return Err("requested window size must be within 320x240 and 4096x4096".into());
     }
     Ok(())
+}
+
+fn apply_window_bounds(
+    title: &str,
+    x: i32,
+    y: i32,
+    width: usize,
+    height: usize,
+) -> Result<(), String> {
+    crate::native::set_window_bounds(title, x, y, width, height)
 }
 
 fn create_window(
@@ -491,6 +545,25 @@ mod tests {
             WindowRequest::Resize {
                 width: 1600,
                 height: 900
+            }
+        );
+        assert_eq!(
+            clamp_window_bounds(-12, 24, 200, 9_000).unwrap(),
+            (-12, 24, 320, 4096)
+        );
+        assert!(clamp_window_bounds(i32::MIN, 0, 640, 480).is_err());
+        assert_eq!(
+            WindowRequest::Bounds {
+                x: 10,
+                y: 20,
+                width: 640,
+                height: 480,
+            },
+            WindowRequest::Bounds {
+                x: 10,
+                y: 20,
+                width: 640,
+                height: 480,
             }
         );
     }
