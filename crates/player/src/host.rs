@@ -60,6 +60,20 @@ pub struct HostContext {
     pub height: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettledWindowObservation {
+    /// Measured outer-frame origin in global top-left logical points.
+    pub x: i32,
+    pub y: i32,
+    /// Measured outer-frame dimensions in logical points.
+    pub width: usize,
+    pub height: usize,
+    /// Backing dimensions of the frame most recently submitted for display.
+    pub drawable_width: usize,
+    pub drawable_height: usize,
+    pub density: u8,
+}
+
 /// A bounded application request applied by the native host between frames.
 /// Product state and labels remain application-owned; the host only manages
 /// generic window lifecycle.
@@ -94,6 +108,7 @@ pub trait Application {
     fn take_window_request(&mut self) -> Option<WindowRequest> {
         None
     }
+    fn observe_settled_window(&mut self, _observation: SettledWindowObservation) {}
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +192,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let mut frame = 0;
     let mut previous_pointer = None;
     let mut previous_left_down = false;
+    let mut window_observation_pending = false;
     // minifb's macOS Metal backend consumes the submitted pixel pointer on an
     // asynchronous display callback. Keep several complete submissions alive
     // so neither a transition frame nor the final static frame can point at a
@@ -186,7 +202,15 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
         let now = Instant::now();
         let delta = now.duration_since(previous);
         previous = now;
-        let (window_width, window_height) = window.get_size();
+        // A non-resizable product changes size only through an accepted
+        // WindowRequest. AppKit applies that request immediately, while
+        // minifb's cached size may lag behind it. Keep the raster contract on
+        // the accepted fixed preset instead of presenting a stale-size frame.
+        let (window_width, window_height) = if active_policy.resizable {
+            window.get_size()
+        } else {
+            (active_policy.width, active_policy.height)
+        };
         let context = HostContext {
             elapsed: now.duration_since(started),
             frame,
@@ -242,7 +266,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                     let (_, _, width, height) = clamp_window_bounds(0, 0, width, height)?;
                     active_policy.width = width;
                     active_policy.height = height;
-                    apply_window_bounds(&active_policy.title, 0, 0, width, height)?;
+                    apply_window_size(width, height)?;
                 }
                 WindowRequest::Bounds {
                     x,
@@ -253,15 +277,16 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                     let (x, y, width, height) = clamp_window_bounds(x, y, width, height)?;
                     active_policy.width = width;
                     active_policy.height = height;
-                    apply_window_bounds(&active_policy.title, x, y, width, height)?;
+                    apply_window_bounds(x, y, width, height)?;
                 }
             }
+            window_observation_pending = true;
             // The native window, callback, focus, input composition, and
             // presentation queue remain alive across the request. The next
-            // frame observes the platform's new drawable size.
+            // submitted frame reports the platform's measured geometry.
             continue;
         }
-        if frame == 0 || app.needs_redraw() {
+        if frame == 0 || window_observation_pending || app.needs_redraw() {
             let mut canvas = Canvas::new_scaled(
                 window_width as u32,
                 window_height as u32,
@@ -279,6 +304,13 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                     physical_height,
                 )
                 .map_err(|e| e.to_string())?;
+            app.observe_settled_window(observe_settled_window(
+                &window,
+                physical_width,
+                physical_height,
+                active_policy.pixel_density,
+            )?);
+            window_observation_pending = false;
             // Three Metal buffers may be in flight. Keep those plus the latest
             // submitted frame alive until a later presentation advances them.
             while presented_frames.len() > 4 {
@@ -302,14 +334,51 @@ fn validate_window_size(width: usize, height: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_window_bounds(
-    title: &str,
-    x: i32,
-    y: i32,
-    width: usize,
-    height: usize,
-) -> Result<(), String> {
-    crate::native::set_window_bounds(title, x, y, width, height)
+#[cfg(target_os = "macos")]
+fn observe_settled_window(
+    _window: &Window,
+    drawable_width: usize,
+    drawable_height: usize,
+    density: u8,
+) -> Result<SettledWindowObservation, String> {
+    let frame = crate::native::observe_window_frame()?;
+    Ok(SettledWindowObservation {
+        x: frame.x,
+        y: frame.y,
+        width: frame.width,
+        height: frame.height,
+        drawable_width,
+        drawable_height,
+        density,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn observe_settled_window(
+    window: &Window,
+    drawable_width: usize,
+    drawable_height: usize,
+    density: u8,
+) -> Result<SettledWindowObservation, String> {
+    let (x, y) = window.get_position();
+    let (width, height) = window.get_size();
+    Ok(SettledWindowObservation {
+        x: i32::try_from(x).map_err(|_| "native window x coordinate exceeds i32".to_owned())?,
+        y: i32::try_from(y).map_err(|_| "native window y coordinate exceeds i32".to_owned())?,
+        width,
+        height,
+        drawable_width,
+        drawable_height,
+        density,
+    })
+}
+
+fn apply_window_bounds(x: i32, y: i32, width: usize, height: usize) -> Result<(), String> {
+    crate::native::set_window_bounds(x, y, width, height)
+}
+
+fn apply_window_size(width: usize, height: usize) -> Result<(), String> {
+    crate::native::set_window_size(width, height)
 }
 
 fn create_window(

@@ -21,46 +21,16 @@ pub const SUPPORTED_ARCH: &str = "arm64";
 /// Apply geometry to the already-created native window. Keeping this adapter
 /// separate from the deterministic renderer lets a bounds request preserve
 /// the window's identity, input callback, focus, and application state.
-pub fn set_window_bounds(
-    title: &str,
-    x: i32,
-    y: i32,
-    width: usize,
-    height: usize,
-) -> Result<(), String> {
-    if title.is_empty() || width == 0 || height == 0 {
-        return Err("window bounds require a title and positive dimensions".into());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let script = format!(
-            "tell application \"System Events\" to tell (first process whose frontmost is true) to set position of first window whose name is {} to {{{}, {}}}; set size of first window whose name is {} to {{{}, {}}}",
-            applescript_string(title),
-            x,
-            y,
-            applescript_string(title),
-            width,
-            height
-        );
-        let result = Command::new("/usr/bin/osascript")
-            .args(["-e", &script])
-            .output()
-            .map_err(|error| format!("cannot apply native window bounds: {error}"))?;
-        if !result.status.success() {
-            return Err("native window bounds request was refused".into());
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (title, x, y, width, height);
-        Err("in-place native window bounds are unsupported on this host".into())
-    }
+pub fn set_window_size(width: usize, height: usize) -> Result<(), String> {
+    keygen_macos::set_window_size(width, height)
 }
 
-#[cfg(target_os = "macos")]
-fn applescript_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+pub fn set_window_bounds(x: i32, y: i32, width: usize, height: usize) -> Result<(), String> {
+    keygen_macos::set_window_bounds(x, y, width, height)
+}
+
+pub fn observe_window_frame() -> Result<keygen_macos::WindowFrame, String> {
+    keygen_macos::observe_window_frame()
 }
 
 /// Design-space geometry shared by headless captures and native windows.

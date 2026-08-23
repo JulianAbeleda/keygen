@@ -1118,6 +1118,65 @@ impl Canvas {
         let top = y + (h - dh) / 2.0;
         self.surface.draw_image(image, left, top, scale, opacity);
     }
+
+    /// Copy an exact backing-pixel region into this canvas without filtering.
+    /// The source must already be rasterized at the destination's physical
+    /// density; this operation only crops it.
+    pub fn blit_surface_region_exact(
+        &mut self,
+        source: &Surface,
+        source_x: u32,
+        source_y: u32,
+    ) -> bool {
+        let width = self.surface.width;
+        let height = self.surface.height;
+        if source_x
+            .checked_add(width)
+            .is_none_or(|right| right > source.width)
+            || source_y
+                .checked_add(height)
+                .is_none_or(|bottom| bottom > source.height)
+        {
+            return false;
+        }
+        for row in 0..height {
+            let source_start = (((source_y + row) * source.width + source_x) * 4) as usize;
+            let target_start = (row * width * 4) as usize;
+            let length = (width * 4) as usize;
+            self.surface.pixels[target_start..target_start + length]
+                .copy_from_slice(&source.pixels[source_start..source_start + length]);
+        }
+        true
+    }
+
+    /// Copy a complete pre-rasterized surface at a backing-pixel offset.
+    /// Fixed-size products use this to place an authored snapshot without
+    /// filtering or deriving layout from a live resize gesture.
+    pub fn blit_surface_exact_at(
+        &mut self,
+        source: &Surface,
+        target_x: u32,
+        target_y: u32,
+    ) -> bool {
+        if target_x
+            .checked_add(source.width)
+            .is_none_or(|right| right > self.surface.width)
+            || target_y
+                .checked_add(source.height)
+                .is_none_or(|bottom| bottom > self.surface.height)
+        {
+            return false;
+        }
+        for row in 0..source.height {
+            let source_start = (row * source.width * 4) as usize;
+            let target_start = (((target_y + row) * self.surface.width + target_x) * 4) as usize;
+            let length = (source.width * 4) as usize;
+            self.surface.pixels[target_start..target_start + length]
+                .copy_from_slice(&source.pixels[source_start..source_start + length]);
+        }
+        true
+    }
+
     pub fn text(
         &mut self,
         face: &FontFace,
@@ -1197,6 +1256,46 @@ mod tests {
             height,
             pixels,
         }
+    }
+
+    fn indexed_surface(width: u32, height: u32) -> Surface {
+        let mut surface = Surface::new(width, height, [0, 0, 0, 0]);
+        for (index, pixel) in surface.pixels.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[index as u8, index as u8 + 10, index as u8 + 20, 255]);
+        }
+        surface
+    }
+
+    #[test]
+    fn exact_region_blit_crops_without_filtering_and_rejects_overflow() {
+        let source = indexed_surface(3, 2);
+        let mut canvas = Canvas::new(2, 1, [99, 99, 99, 255]);
+        assert!(canvas.blit_surface_region_exact(&source, 1, 1));
+        assert_eq!(canvas.surface().pixels, [4, 14, 24, 255, 5, 15, 25, 255]);
+
+        let before = canvas.surface().pixels.clone();
+        assert!(!canvas.blit_surface_region_exact(&source, 2, 1));
+        assert_eq!(canvas.surface().pixels, before);
+    }
+
+    #[test]
+    fn exact_positioned_blit_places_pixels_and_rejects_overflow() {
+        let source = indexed_surface(2, 2);
+        let mut canvas = Canvas::new(4, 3, [99, 99, 99, 255]);
+        assert!(canvas.blit_surface_exact_at(&source, 1, 1));
+        let stride = 4 * 4;
+        assert_eq!(
+            canvas.surface().pixels[stride + 4..stride + 12],
+            source.pixels[0..8]
+        );
+        assert_eq!(
+            canvas.surface().pixels[stride * 2 + 4..stride * 2 + 12],
+            source.pixels[8..16]
+        );
+
+        let before = canvas.surface().pixels.clone();
+        assert!(!canvas.blit_surface_exact_at(&source, 3, 2));
+        assert_eq!(canvas.surface().pixels, before);
     }
 
     #[test]

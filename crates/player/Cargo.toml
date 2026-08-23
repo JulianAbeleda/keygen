@@ -9,6 +9,7 @@ description = "Headless CLI and native player for the KeyGen game engine"
 
 [dependencies]
 keygen-engine = { path = "../engine" }
+keygen-macos = { path = "../macos" }
 minifb.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -365,10 +365,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "keygen-macos"
+version = "0.1.0"
+
+[[package]]
 name = "keygen-player"
 version = "0.1.0"
 dependencies = [
  "keygen-engine",
+ "keygen-macos",
  "minifb",
  "serde",
  "serde_json",

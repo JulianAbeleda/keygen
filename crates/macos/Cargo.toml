@@ -1,0 +1,11 @@
+[package]
+name = "keygen-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Narrow macOS platform adapter for KeyGen native hosts"
+
+[lib]
+path = "src/lib.rs"
