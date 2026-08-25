@@ -1,6 +1,6 @@
 //! Generic native application host. Product crates provide only state and drawing.
 use keygen_engine::{Canvas, Surface};
-use minifb::{InputCallback, Key, MouseButton, MouseMode, Window, WindowOptions};
+use minifb::{CursorStyle, InputCallback, Key, MouseButton, MouseMode, Window, WindowOptions};
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -30,6 +30,16 @@ pub enum HostEvent {
     },
     Tick(Duration),
     Close,
+}
+
+/// Product-requested native pointer treatment. Keep this intentionally small:
+/// applications describe the interaction affordance while the host owns the
+/// platform cursor implementation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PointerCursor {
+    #[default]
+    Default,
+    Text,
 }
 
 /// Modifier state sampled with each key event. This is deliberately generic
@@ -102,6 +112,10 @@ pub trait Application {
     }
     fn should_close(&self) -> bool {
         false
+    }
+    /// Cursor requested for the most recently delivered pointer position.
+    fn pointer_cursor(&self) -> PointerCursor {
+        PointerCursor::Default
     }
     /// Consume a pending native-window request. The default keeps existing
     /// applications source-compatible and window-static.
@@ -192,6 +206,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let mut frame = 0;
     let mut previous_pointer = None;
     let mut previous_left_down = false;
+    let mut previous_cursor = PointerCursor::Default;
     let mut window_observation_pending = false;
     // minifb's macOS Metal backend consumes the submitted pixel pointer on an
     // asynchronous display callback. Keep several complete submissions alive
@@ -260,6 +275,11 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                 previous_left_down = down;
             }
         }
+        let cursor = app.pointer_cursor();
+        if cursor != previous_cursor {
+            window.set_cursor_style(native_cursor(cursor));
+            previous_cursor = cursor;
+        }
         if let Some(request) = app.take_window_request() {
             match request {
                 WindowRequest::Resize { width, height } => {
@@ -323,6 +343,13 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     }
     app.event(HostEvent::Close);
     Ok(())
+}
+
+fn native_cursor(cursor: PointerCursor) -> CursorStyle {
+    match cursor {
+        PointerCursor::Default => CursorStyle::Arrow,
+        PointerCursor::Text => CursorStyle::Ibeam,
+    }
 }
 
 fn validate_window_size(width: usize, height: usize) -> Result<(), String> {
@@ -576,6 +603,13 @@ mod tests {
     fn scaled_headless_render_rejects_invalid_density() {
         assert!(render_frame_scaled(&mut SolidApp, 3, 2, 0, 0, 0).is_err());
         assert!(render_frame_scaled(&mut SolidApp, 3, 2, 5, 0, 0).is_err());
+    }
+
+    #[test]
+    fn pointer_cursor_defaults_to_arrow_and_maps_text_to_ibeam() {
+        assert_eq!(SolidApp.pointer_cursor(), PointerCursor::Default);
+        assert_eq!(native_cursor(PointerCursor::Default), CursorStyle::Arrow);
+        assert_eq!(native_cursor(PointerCursor::Text), CursorStyle::Ibeam);
     }
 
     #[test]
