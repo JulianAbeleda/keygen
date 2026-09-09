@@ -201,7 +201,15 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let pending_input = Rc::new(RefCell::new(PendingInput::default()));
     let mut active_policy = policy;
     let mut window = create_window(&active_policy, pending_input.clone())?;
+    let manual_presentation =
+        cfg!(target_os = "macos") && std::env::var("KEYGEN_MANUAL_PRESENT").as_deref() == Ok("1");
+    if manual_presentation {
+        keygen_macos::enable_explicit_presentation()?;
+        window.set_target_fps(0);
+    }
     let started = Instant::now();
+    let interval = Duration::from_secs_f64(1.0 / active_policy.target_fps as f64);
+    let mut deadline = started;
     let mut previous = started;
     let mut frame = 0;
     let mut previous_pointer = None;
@@ -214,6 +222,12 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     // temporary Vec that Rust has already released.
     let mut presented_frames: VecDeque<Vec<u32>> = VecDeque::with_capacity(5);
     while window.is_open() && !app.should_close() {
+        if manual_presentation {
+            if let Some(wait) = deadline.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+            deadline = next_frame_deadline(deadline, Instant::now(), interval);
+        }
         let now = Instant::now();
         let delta = now.duration_since(previous);
         previous = now;
@@ -324,6 +338,9 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                     physical_height,
                 )
                 .map_err(|e| e.to_string())?;
+            if manual_presentation {
+                keygen_macos::present_frame()?;
+            }
             app.observe_settled_window(observe_settled_window(
                 &window,
                 physical_width,
@@ -343,6 +360,15 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     }
     app.event(HostEvent::Close);
     Ok(())
+}
+
+fn next_frame_deadline(previous: Instant, now: Instant, interval: Duration) -> Instant {
+    let next = previous + interval;
+    if next > now {
+        next
+    } else {
+        now + interval
+    }
 }
 
 fn native_cursor(cursor: PointerCursor) -> CursorStyle {
@@ -539,6 +565,20 @@ pub fn render_frame_scaled<A: Application>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frame_deadlines_preserve_phase_and_skip_missed_slots() {
+        let start = std::time::Instant::now();
+        let interval = std::time::Duration::from_millis(16);
+        assert_eq!(
+            super::next_frame_deadline(start, start + interval / 2, interval),
+            start + interval
+        );
+        assert_eq!(
+            super::next_frame_deadline(start, start + interval * 3, interval),
+            start + interval * 4
+        );
+    }
+
     use super::*;
 
     struct SolidApp;

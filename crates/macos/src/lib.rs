@@ -141,6 +141,50 @@ mod appkit {
         }
     }
 
+    /// Called only by the native host. No object pointer escapes this call:
+    /// AppKit owns the window/view, and main-thread validation prevents races
+    /// with teardown. The exact MTKView class guards every selector below.
+    pub(super) fn explicit_presentation(draw: bool) -> Result<(), String> {
+        unsafe {
+            let query: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i8 =
+                std::mem::transmute(objc_msgSend as *const ());
+            if query(
+                objc_getClass(c"NSThread".as_ptr()),
+                selector(b"isMainThread\0"),
+            ) == 0
+            {
+                return Err("Metal presentation requires the main thread".into());
+            }
+            let window = application_window()?;
+            let content = send_object(window, selector(b"contentView\0"));
+            let children = send_object(content, selector(b"subviews\0"));
+            let metal_class = objc_getClass(c"MTKView".as_ptr());
+            if children.is_null() || metal_class.is_null() {
+                return Err("native Metal view is unavailable".into());
+            }
+            let is_kind: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i8 =
+                std::mem::transmute(objc_msgSend as *const ());
+            for index in 0..send_count(children, selector(b"count\0")) {
+                let view = send_index(children, index);
+                if is_kind(view, selector(b"isKindOfClass:\0"), metal_class) == 0 {
+                    continue;
+                }
+                if draw {
+                    let send: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+                        std::mem::transmute(objc_msgSend as *const ());
+                    send(view, selector(b"draw\0"));
+                } else {
+                    let set: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
+                        std::mem::transmute(objc_msgSend as *const ());
+                    set(view, selector(b"setPaused:\0"), 1);
+                    set(view, selector(b"setEnableSetNeedsDisplay:\0"), 0);
+                }
+                return Ok(());
+            }
+            Err("native Metal view is unavailable".into())
+        }
+    }
+
     unsafe fn set_frame(window: *mut c_void, frame: NSRect) {
         let send: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect, i8) =
             std::mem::transmute(objc_msgSend as *const ());
@@ -254,9 +298,49 @@ pub fn observe_window_frame() -> Result<WindowFrame, String> {
     }
 }
 
+/// Opt the current host window into MetalKit's explicit drawing mode.
+pub fn enable_explicit_presentation() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        appkit::explicit_presentation(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("explicit Metal presentation is unsupported on this host".into())
+    }
+}
+
+/// Submit the current host frame on the main thread, outside any draw callback.
+pub fn present_frame() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        appkit::explicit_presentation(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("explicit Metal presentation is unsupported on this host".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn explicit_presentation_refuses_non_main_thread_calls() {
+        let results = std::thread::spawn(|| (enable_explicit_presentation(), present_frame()))
+            .join()
+            .unwrap();
+        assert_eq!(
+            results.0.unwrap_err(),
+            "Metal presentation requires the main thread"
+        );
+        assert_eq!(
+            results.1.unwrap_err(),
+            "Metal presentation requires the main thread"
+        );
+    }
 
     #[test]
     fn top_left_conversion_preserves_negative_origins() {
