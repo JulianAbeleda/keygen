@@ -60,6 +60,7 @@ impl Image {
         })
     }
 
+    #[inline(always)]
     pub fn rgba(&self, x: u32, y: u32) -> [u8; 4] {
         let offset = ((y * self.width + x) * 4) as usize;
         [
@@ -70,6 +71,9 @@ impl Image {
         ]
     }
 
+    // Sampling runs per destination pixel; expose this arithmetic to the
+    // raster loop so bounds/coordinate work can optimize across the call.
+    #[inline(always)]
     pub fn sample_bilinear(&self, x: f32, y: f32) -> [u8; 4] {
         let x = x.clamp(0.0, self.width.saturating_sub(1) as f32);
         let y = y.clamp(0.0, self.height.saturating_sub(1) as f32);

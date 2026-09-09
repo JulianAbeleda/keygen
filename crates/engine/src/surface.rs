@@ -58,6 +58,7 @@ impl Surface {
         }
     }
 
+    #[inline(always)]
     pub fn blend(&mut self, x: i32, y: i32, color: [u8; 4], opacity: f32) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
@@ -420,9 +421,55 @@ impl Canvas {
         if opacity >= 1.0 {
             return self.blit_surface(source, left, top);
         }
+        self.composite_rows::<true>(source, left, top, opacity)
+    }
+
+    fn composite_rows<const OPAQUE: bool>(
+        &mut self,
+        source: &Surface,
+        left: i32,
+        top: i32,
+        opacity: f32,
+    ) -> bool {
+        // A pre-rasterized opaque overlay is the hot path. Clip once per row;
+        // opaque destinations need no alpha normalization. Preserve the generic
+        // blend path for translucent rows and non-finite input.
+        let first_x = (-(left as i64)).max(0).min(source.width as i64) as usize;
+        let end_x = (self.surface.width as i64 - left as i64)
+            .max(0)
+            .min(source.width as i64) as usize;
+        if first_x >= end_x {
+            return true;
+        }
         for sy in 0..source.height as i32 {
             let dy = top + sy;
             if dy < 0 || dy >= self.surface.height as i32 {
+                continue;
+            }
+            let src_start = (sy as usize * source.width as usize + first_x) * 4;
+            let dst_start = (dy as usize * self.surface.width as usize
+                + (left as i64 + first_x as i64) as usize)
+                * 4;
+            let len = (end_x - first_x) * 4;
+            let src_row = &source.pixels[src_start..src_start + len];
+            let dst_row = &mut self.surface.pixels[dst_start..dst_start + len];
+            if opacity.is_finite() && dst_row.chunks_exact(4).all(|pixel| pixel[3] == 255) {
+                for (src, dst) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
+                    let alpha = if OPAQUE {
+                        opacity
+                    } else {
+                        (f32::from(src[3]) / 255.0 * opacity.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+                    };
+                    if !OPAQUE && alpha == 1.0 {
+                        dst.copy_from_slice(src);
+                        continue;
+                    }
+                    for channel in 0..3 {
+                        dst[channel] = (f32::from(src[channel]) * alpha
+                            + f32::from(dst[channel]) * (1.0 - alpha))
+                            .round() as u8;
+                    }
+                }
                 continue;
             }
             for sx in 0..source.width as i32 {
@@ -438,7 +485,7 @@ impl Canvas {
                         source.pixels[src],
                         source.pixels[src + 1],
                         source.pixels[src + 2],
-                        255,
+                        source.pixels[src + 3],
                     ],
                     opacity,
                 );
@@ -463,28 +510,7 @@ impl Canvas {
         if opacity <= 0.0 {
             return true;
         }
-        for sy in 0..source.height as i32 {
-            let dy = top + sy;
-            if dy < 0 || dy >= self.surface.height as i32 {
-                continue;
-            }
-            for sx in 0..source.width as i32 {
-                let dx = left + sx;
-                if dx < 0 || dx >= self.surface.width as i32 {
-                    continue;
-                }
-                let source_offset = ((sy as u32 * source.width + sx as u32) * 4) as usize;
-                self.surface.blend(
-                    dx,
-                    dy,
-                    source.pixels[source_offset..source_offset + 4]
-                        .try_into()
-                        .expect("RGBA chunk has four channels"),
-                    opacity,
-                );
-            }
-        }
-        true
+        self.composite_rows::<false>(source, left, top, opacity)
     }
 
     /// Draws a CSS-style blurred rounded shadow with enough offscreen padding
@@ -625,6 +651,38 @@ impl Canvas {
         let start_y = y.floor().max(0.0) as i32;
         let end_x = (x + w).ceil().min(self.surface.width as f32) as i32;
         let end_y = (y + h).ceil().min(self.surface.height as f32) as i32;
+        if stroke.is_none() && [x, y, w, h].iter().all(|v| v.is_finite()) {
+            // The reference's inside test excludes fractional leading pixels.
+            let first_x = x.ceil().max(0.0) as i32;
+            let first_y = y.ceil().max(0.0) as i32;
+            if first_x >= end_x || first_y >= end_y {
+                return;
+            }
+            let alpha = f32::from(color[3]) / 255.0;
+            for py in first_y..end_y {
+                let start = ((py as usize * self.surface.width as usize) + first_x as usize) * 4;
+                let length = (end_x - first_x) as usize * 4;
+                let row = &mut self.surface.pixels[start..start + length];
+                if color[3] == 255 {
+                    for pixel in row.chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&color);
+                    }
+                } else if row.chunks_exact(4).all(|pixel| pixel[3] == 255) {
+                    for pixel in row.chunks_exact_mut(4) {
+                        for channel in 0..3 {
+                            pixel[channel] = (f32::from(color[channel]) * alpha
+                                + f32::from(pixel[channel]) * (1.0 - alpha))
+                                .round() as u8;
+                        }
+                    }
+                } else {
+                    for px in first_x..end_x {
+                        self.surface.blend(px, py, color, 1.0);
+                    }
+                }
+            }
+            return;
+        }
         for py in start_y..end_y {
             for px in start_x..end_x {
                 let inside = (px as f32) >= x
@@ -1248,6 +1306,174 @@ impl Canvas {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mixed_alpha_overlay_rows_match_generic_blend() {
+        let mut source = super::Surface::new(16, 1, [173, 47, 251, 255]);
+        for (i, pixel) in source.pixels.chunks_exact_mut(4).enumerate() {
+            pixel[3] = (i * 17) as u8;
+        }
+        for destination_alpha in [0, 1, 127, 254, 255] {
+            for opacity in [-1.0, 0.0, 0.01, 0.3, 0.5, 0.9, 1.0, 2.0, f32::NAN] {
+                for left in -17..=17 {
+                    for top in -1..=2 {
+                        let mut canvas =
+                            super::Canvas::new(16, 2, [91, 254, 13, destination_alpha]);
+                        let mut reference = canvas.surface().clone();
+                        for x in 0..16 {
+                            if opacity > 0.0 || opacity.is_nan() {
+                                reference.blend(
+                                    left + x,
+                                    top,
+                                    source.pixels[x as usize * 4..x as usize * 4 + 4]
+                                        .try_into()
+                                        .unwrap(),
+                                    opacity,
+                                );
+                            }
+                        }
+                        assert!(canvas.composite_surface(&source, left, top, opacity));
+                        assert_eq!(canvas.surface(), &reference);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solid_rectangle_rows_preserve_fractional_clipping_and_alpha() {
+        for density in [1.0, 1.5, 2.0] {
+            for destination_alpha in [0, 1, 127, 254, 255] {
+                for source_alpha in [0, 1, 17, 128, 254, 255] {
+                    for rect in [
+                        [0.0, 0.0, 8.0, 8.0],
+                        [-2.3, -0.7, 5.5, 4.1],
+                        [0.2, 1.2, 3.0, 4.0],
+                        [2.0, 2.0, -1.0, 3.0],
+                        [8.0, 8.0, 3.0, 3.0],
+                        [2.0, 2.0, 0.0, 0.0],
+                        [-10.0, -10.0, 30.0, 30.0],
+                    ] {
+                        let mut canvas = super::Canvas::new_scaled(
+                            8,
+                            8,
+                            density,
+                            [253, 17, 91, destination_alpha],
+                        );
+                        let mut reference = canvas.surface().clone();
+                        let [x, y, w, h] = rect.map(|value| value * density);
+                        let color = [13, 149, 250, source_alpha];
+                        for py in 0..reference.height as i32 {
+                            for px in 0..reference.width as i32 {
+                                if px as f32 >= x
+                                    && (px as f32) < x + w
+                                    && py as f32 >= y
+                                    && (py as f32) < y + h
+                                {
+                                    reference.blend(px, py, color, 1.0);
+                                }
+                            }
+                        }
+                        canvas.fill_rect(rect, color);
+                        assert_eq!(canvas.surface(), &reference,
+                            "density={density} rect={rect:?} alpha={source_alpha}/{destination_alpha}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retained_overlay_rows_match_generic_blend_with_clipping() {
+        let mut source = super::Surface::new(4, 3, [13, 97, 255, 255]);
+        for (i, pixel) in source.pixels.chunks_exact_mut(4).enumerate() {
+            pixel[0] = (i * 23) as u8;
+        }
+        for alpha in [0, 1, 127, 254, 255] {
+            for opacity in [-1.0, 0.0, 0.01, 0.3, 0.5, 0.9, 1.0, 2.0, f32::NAN] {
+                for left in -5..=9 {
+                    for top in -4..=9 {
+                        let mut canvas = super::Canvas::new(8, 8, [73, 251, 9, alpha]);
+                        let mut reference = canvas.surface().clone();
+                        for sy in 0..source.height as i32 {
+                            for sx in 0..source.width as i32 {
+                                let i = ((sy as u32 * source.width + sx as u32) * 4) as usize;
+                                // blend_surface's full-opacity branch is an exact
+                                // copy; all other positive opacities use blend.
+                                if opacity > 0.0 || opacity.is_nan() {
+                                    reference.blend(
+                                        left + sx,
+                                        top + sy,
+                                        source.pixels[i..i + 4].try_into().unwrap(),
+                                        opacity,
+                                    );
+                                }
+                            }
+                        }
+                        assert!(canvas.blend_surface(&source, left, top, opacity));
+                        assert_eq!(
+                            canvas.surface(),
+                            &reference,
+                            "alpha={alpha} opacity={opacity} offset={left},{top}"
+                        );
+                    }
+                }
+            }
+        }
+        source.pixels[3] = 254;
+        let mut canvas = super::Canvas::new(8, 8, [0; 4]);
+        let before = canvas.surface().clone();
+        assert!(!canvas.blend_surface(&source, 0, 0, 0.5));
+        assert_eq!(canvas.surface(), &before);
+    }
+
+    #[test]
+    fn opaque_blend_matches_generic_alpha_arithmetic() {
+        fn reference(destination: [u8; 4], color: [u8; 4], opacity: f32) -> [u8; 4] {
+            let a = (f32::from(color[3]) / 255.0 * opacity.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            let d = f32::from(destination[3]) / 255.0;
+            let out = a + d * (1.0 - a);
+            let mut result = [0; 4];
+            for i in 0..3 {
+                let p = f32::from(color[i]) * a + f32::from(destination[i]) * d * (1.0 - a);
+                result[i] = if out > 0.0 {
+                    (p / out).round() as u8
+                } else {
+                    0
+                };
+            }
+            result[3] = (out * 255.0).round() as u8;
+            result
+        }
+        let mut surface = super::Surface::new(1, 1, [0; 4]);
+        for alpha in 0..=255u8 {
+            for source in 0..=255u8 {
+                for destination in [0, 1, 63, 127, 128, 191, 254, 255] {
+                    for opacity in [-1.0, 0.0, 0.01, 0.1, 0.3, 0.5, 0.9, 0.99, 1.0, 2.0] {
+                        let color = [source, 255 - source, source / 2, alpha];
+                        let before = [destination, 255 - destination, destination / 2, 255];
+                        surface.pixels.copy_from_slice(&before);
+                        surface.blend(0, 0, color, opacity);
+                        assert_eq!(surface.pixels, reference(before, color, opacity));
+                    }
+                }
+            }
+        }
+        for destination_alpha in [0, 1, 127, 254, 255] {
+            for opacity in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.3] {
+                let before = [20, 100, 240, destination_alpha];
+                let color = [255, 50, 0, 128];
+                surface.pixels.copy_from_slice(&before);
+                surface.blend(0, 0, color, opacity);
+                assert_eq!(surface.pixels, reference(before, color, opacity));
+            }
+        }
+        let before = surface.clone();
+        for (x, y) in [(-1, 0), (0, -1), (1, 0), (0, 1)] {
+            surface.blend(x, y, [255; 4], 1.0);
+        }
+        assert_eq!(surface, before);
+    }
+
     use super::*;
 
     fn image(width: u32, height: u32, pixels: Vec<u8>) -> Image {
