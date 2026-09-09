@@ -104,14 +104,6 @@ pub enum WindowRequest {
 
 pub trait Application {
     fn frame(&mut self, canvas: &mut Canvas, context: HostContext);
-    /// Host opt-in for a final raster overlay. Called for each frame; default
-    /// applications and all ordinary headless rendering stay CPU-only.
-    fn defer_final_overlay(&mut self, _enabled: bool) {}
-    fn final_overlay(&self) -> Option<FinalOverlay<'_>> {
-        None
-    }
-    /// Exact application-owned fallback if optional host composition fails.
-    fn finish_final_overlay(&mut self, _canvas: &mut Canvas) {}
     fn event(&mut self, _event: HostEvent) {}
     /// Return false when the previously presented buffer remains valid. The
     /// host will continue polling native events without rerasterizing it.
@@ -131,104 +123,6 @@ pub trait Application {
         None
     }
     fn observe_settled_window(&mut self, _observation: SettledWindowObservation) {}
-}
-
-/// One borrowed last layer, not a scene graph. The host must finish it before
-/// presentation and cannot retain it across application events.
-pub struct FinalOverlay<'a> {
-    pub surface: &'a Surface,
-    pub physical_rect: [f32; 4],
-    pub brightness: f32,
-    pub opacity: f32,
-}
-
-/// Optional host capability. Headless callers must opt in explicitly; the
-/// deterministic render_frame_scaled entry point never constructs this object.
-pub struct FrameCompositor {
-    gpu: Option<keygen_macos::RasterCompositor>,
-}
-
-impl FrameCompositor {
-    pub fn from_environment() -> Self {
-        Self::new(std::env::var("KEYGEN_GPU_COMPOSITION").as_deref() == Ok("1"))
-    }
-
-    pub fn new(enabled: bool) -> Self {
-        let gpu = if enabled {
-            let started = Instant::now();
-            match keygen_macos::RasterCompositor::new() {
-                Ok(gpu) => {
-                    eprintln!(
-                        "gpu-composition ready init_ms={:.3}",
-                        started.elapsed().as_secs_f64() * 1000.0
-                    );
-                    Some(gpu)
-                }
-                Err(error) => {
-                    eprintln!("gpu-composition unavailable: {error}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        Self { gpu }
-    }
-
-    pub fn render<A: Application>(
-        &mut self,
-        app: &mut A,
-        canvas: &mut Canvas,
-        context: HostContext,
-    ) -> bool {
-        app.defer_final_overlay(self.gpu.is_some());
-        app.frame(canvas, context);
-        let mut used_gpu = false;
-        if let Some(overlay) = app.final_overlay() {
-            let base = canvas.surface();
-            let result = self
-                .gpu
-                .as_mut()
-                .ok_or_else(|| "GPU unavailable".to_owned())
-                .and_then(|gpu| {
-                    gpu.compose(
-                        &base.pixels,
-                        base.width as usize,
-                        base.height as usize,
-                        keygen_macos::RasterOverlay {
-                            pixels: &overlay.surface.pixels,
-                            width: overlay.surface.width as usize,
-                            height: overlay.surface.height as usize,
-                            rect: overlay.physical_rect,
-                            brightness: overlay.brightness,
-                            opacity: overlay.opacity,
-                        },
-                    )
-                });
-            match result {
-                Ok(pixels) => {
-                    *canvas = Canvas::from_surface_scaled(
-                        Surface {
-                            width: base.width,
-                            height: base.height,
-                            pixels,
-                        },
-                        canvas.width(),
-                        canvas.height(),
-                        canvas.density(),
-                    );
-                    used_gpu = true;
-                }
-                Err(error) => {
-                    eprintln!("gpu-composition fallback: {error}");
-                    app.finish_final_overlay(canvas);
-                    self.gpu = None;
-                }
-            }
-        }
-        app.defer_final_overlay(false);
-        used_gpu
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -307,8 +201,6 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let pending_input = Rc::new(RefCell::new(PendingInput::default()));
     let mut active_policy = policy;
     let mut window = create_window(&active_policy, pending_input.clone())?;
-    let mut compositor = FrameCompositor::from_environment();
-    let trace_frames = std::env::var("KEYGEN_FRAME_TRACE").as_deref() == Ok("1");
     let started = Instant::now();
     let mut previous = started;
     let mut frame = 0;
@@ -321,6 +213,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     // so neither a transition frame nor the final static frame can point at a
     // temporary Vec that Rust has already released.
     let mut presented_frames: VecDeque<Vec<u32>> = VecDeque::with_capacity(5);
+    let mut retired_packed = Vec::new();
     while window.is_open() && !app.should_close() {
         let now = Instant::now();
         let delta = now.duration_since(previous);
@@ -415,18 +308,17 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
             continue;
         }
         if frame == 0 || window_observation_pending || app.needs_redraw() {
-            let rendering_started = Instant::now();
             let mut canvas = Canvas::new_scaled(
                 window_width as u32,
                 window_height as u32,
                 f32::from(active_policy.pixel_density),
                 [0, 0, 0, 255],
             );
-            let used_gpu = compositor.render(&mut app, &mut canvas, context);
-            let render_ms = rendering_started.elapsed().as_secs_f64() * 1000.0;
+            app.frame(&mut canvas, context);
             let physical_width = canvas.surface().width as usize;
             let physical_height = canvas.surface().height as usize;
-            presented_frames.push_back(canvas.surface().packed_rgb());
+            canvas.surface().packed_rgb_into(&mut retired_packed);
+            presented_frames.push_back(std::mem::take(&mut retired_packed));
             window
                 .update_with_buffer(
                     presented_frames.back().expect("presented frame was queued"),
@@ -434,9 +326,6 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                     physical_height,
                 )
                 .map_err(|e| e.to_string())?;
-            if trace_frames {
-                eprintln!("frame-trace frame={frame} gpu={used_gpu} render_ms={render_ms:.3} submit_ms={:.3}", rendering_started.elapsed().as_secs_f64()*1000.0);
-            }
             app.observe_settled_window(observe_settled_window(
                 &window,
                 physical_width,
@@ -447,7 +336,8 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
             // Three Metal buffers may be in flight. Keep those plus the latest
             // submitted frame alive until a later presentation advances them.
             while presented_frames.len() > 4 {
-                presented_frames.pop_front();
+                // Refill next frame, only after the established retirement point.
+                retired_packed = presented_frames.pop_front().expect("queue exceeds four");
             }
         } else {
             window.update();
@@ -638,7 +528,6 @@ pub fn render_frame_scaled<A: Application>(
         f32::from(pixel_density),
         [0, 0, 0, 255],
     );
-    app.defer_final_overlay(false);
     app.frame(
         &mut canvas,
         HostContext {
@@ -654,55 +543,6 @@ pub fn render_frame_scaled<A: Application>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn missing_gpu_finishes_pending_overlay_on_cpu_and_clears_it() {
-        struct Pending {
-            surface: Surface,
-            pending: bool,
-            finished: bool,
-        }
-        impl Application for Pending {
-            fn frame(&mut self, canvas: &mut Canvas, _: HostContext) {
-                canvas.clear([0, 0, 0, 255]);
-                self.pending = true;
-            }
-            fn final_overlay(&self) -> Option<FinalOverlay<'_>> {
-                self.pending.then_some(FinalOverlay {
-                    surface: &self.surface,
-                    physical_rect: [0.0, 0.0, 2.0, 2.0],
-                    brightness: 1.0,
-                    opacity: 1.0,
-                })
-            }
-            fn finish_final_overlay(&mut self, canvas: &mut Canvas) {
-                canvas.clear([255, 0, 0, 255]);
-                self.finished = true;
-            }
-            fn defer_final_overlay(&mut self, _: bool) {
-                self.pending = false;
-            }
-        }
-        let mut app = Pending {
-            surface: Surface::new(2, 2, [255, 0, 0, 255]),
-            pending: false,
-            finished: false,
-        };
-        let mut canvas = Canvas::new(2, 2, [0; 4]);
-        let mut compositor = FrameCompositor::new(false);
-        assert!(!compositor.render(
-            &mut app,
-            &mut canvas,
-            HostContext {
-                elapsed: Duration::ZERO,
-                frame: 0,
-                width: 2,
-                height: 2
-            }
-        ));
-        assert!(app.finished && !app.pending);
-        assert_eq!(canvas.into_surface(), app.surface);
-    }
 
     struct SolidApp;
     impl Application for SolidApp {

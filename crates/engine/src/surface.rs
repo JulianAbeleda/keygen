@@ -229,6 +229,18 @@ impl Surface {
             })
             .collect()
     }
+
+    /// Refill an exact-size retired presentation buffer without reallocating.
+    /// Geometry changes replace capacity instead of retaining a larger surface.
+    pub fn packed_rgb_into(&self, output: &mut Vec<u32>) {
+        if output.len() != self.pixels.len() / 4 {
+            *output = self.packed_rgb();
+            return;
+        }
+        for (out, pixel) in output.iter_mut().zip(self.pixels.chunks_exact(4)) {
+            *out = (u32::from(pixel[0]) << 16) | (u32::from(pixel[1]) << 8) | u32::from(pixel[2]);
+        }
+    }
 }
 
 fn inside_polygon(points: &[[f32; 2]], px: f32, py: f32, rule: FillRule) -> bool {
@@ -1306,6 +1318,23 @@ impl Canvas {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reused_rgb_matches_fresh_on_reuse_shrink_and_growth() {
+        let mut output = Vec::new();
+        for (width, height) in [(7, 3), (7, 3), (1, 1), (19, 11), (19, 11)] {
+            let mut surface = super::Surface::new(width, height, [0, 0, 0, 0]);
+            for (index, channel) in surface.pixels.iter_mut().enumerate() {
+                *channel = (index.wrapping_mul(71) % 256) as u8;
+            }
+            let pointer = output.as_ptr();
+            let reused = output.len() == surface.pixels.len() / 4;
+            surface.packed_rgb_into(&mut output);
+            assert_eq!(output, surface.packed_rgb());
+            if reused {
+                assert_eq!(pointer, output.as_ptr());
+            }
+        }
+    }
     #[test]
     fn mixed_alpha_overlay_rows_match_generic_blend() {
         let mut source = super::Surface::new(16, 1, [173, 47, 251, 255]);
