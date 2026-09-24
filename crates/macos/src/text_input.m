@@ -46,7 +46,7 @@
         return;
     }
     BOOL composing = self.hasMarkedText;
-    [self interpretKeyEvents:@[event]];
+    [self.inputContext handleEvent:event];
     // Enter that accepts an IME candidate is not an application Return.
     // Ordinary keys still reach minifb's key-state callback; its duplicate
     // character callback is filtered by the Rust host while enabled.
@@ -127,7 +127,11 @@ void kg_text_input_set(void *handle, bool enabled, double x, double y, double wi
     KGTextInputView *view = (__bridge KGTextInputView *)handle;
     if (!enabled) [view cancelComposition];
     view.enabled = enabled;
-    view.caret = NSMakeRect(x, y, width, height);
+    NSRect caret = NSMakeRect(x, y, width, height);
+    if (!NSEqualRects(view.caret, caret)) {
+        view.caret = caret;
+        [view.inputContext invalidateCharacterCoordinates];
+    }
     if (enabled && view.owner.firstResponder != view) [view.owner makeFirstResponder:view];
     if (!enabled && view.owner.firstResponder == view) [view.owner makeFirstResponder:view.previous];
 }
