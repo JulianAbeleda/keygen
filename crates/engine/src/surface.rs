@@ -293,20 +293,40 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 
 /// A decoded font that can be reused by a [`Canvas`].
 #[derive(Clone)]
-pub struct FontFace(Font);
+pub struct FontFace(Vec<std::sync::Arc<Font>>);
 
 impl FontFace {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
         Font::from_bytes(bytes, FontSettings::default())
-            .map(Self)
+            .map(|font| Self(vec![std::sync::Arc::new(font)]))
             .map_err(|e| format!("cannot decode font: {e}"))
+    }
+
+    /// Ordered fallback data supplied by the host; decoding never performs I/O.
+    /// The same covering face owns measurement and rasterization.
+    pub fn with_fallback(mut self, fallback: &Self) -> Self {
+        self.0.extend(fallback.0.iter().cloned());
+        self
+    }
+
+    pub fn covers(&self, character: char) -> bool {
+        self.0
+            .iter()
+            .any(|font| font.lookup_glyph_index(character) != 0)
+    }
+
+    fn font_for(&self, character: char) -> &Font {
+        self.0
+            .iter()
+            .find(|font| font.lookup_glyph_index(character) != 0)
+            .unwrap_or(&self.0[0])
     }
 
     pub fn measure(&self, text: &str, size: f32, letter_spacing: f32) -> [f32; 2] {
         let mut width: f32 = 0.0;
         let mut height: f32 = 0.0;
         for (index, character) in text.chars().enumerate() {
-            let metrics = self.0.metrics(character, size);
+            let metrics = self.font_for(character).metrics(character, size);
             if index > 0 {
                 width += letter_spacing;
             }
@@ -1279,7 +1299,7 @@ impl Canvas {
             if index > 0 {
                 x += letter_spacing;
             }
-            let (metrics, bitmap) = face.0.rasterize(ch, size);
+            let (metrics, bitmap) = face.font_for(ch).rasterize(ch, size);
             let glyph_x = x + metrics.xmin as f32;
             let glyph_y = baseline - metrics.ymin as f32 - metrics.height as f32;
             for gy in 0..metrics.height {

@@ -8,6 +8,28 @@ use keygen_engine::{
 };
 
 #[test]
+fn font_fallback_preserves_primary_metrics_and_pixels() {
+    use keygen_engine::{Canvas, FontFace};
+    let face = FontFace::from_bytes(
+        include_bytes!("../../../examples/sample_project/assets/sample.ttf").to_vec(),
+    )
+    .unwrap();
+    let fallback = face.clone().with_fallback(&face);
+    assert!(fallback.covers('A'));
+    assert!(!fallback.covers('\u{10ffff}'));
+    assert_eq!(
+        face.measure("Latin text", 18.0, 1.0),
+        fallback.measure("Latin text", 18.0, 1.0)
+    );
+    let draw = |font: &FontFace| {
+        let mut canvas = Canvas::new(160, 40, [0, 0, 0, 0]);
+        canvas.text(font, "Latin text", [4.0, 28.0], 18.0, [255; 4], None);
+        canvas.encode_png().unwrap()
+    };
+    assert_eq!(draw(&face), draw(&fallback));
+}
+
+#[test]
 fn easing_endpoints_are_exact() {
     for easing in [
         Easing::Linear,
