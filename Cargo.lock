@@ -367,6 +367,9 @@ dependencies = [
 [[package]]
 name = "keygen-macos"
 version = "0.1.0"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "keygen-player"

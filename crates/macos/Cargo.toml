@@ -9,3 +9,6 @@ description = "Narrow macOS platform adapter for KeyGen native hosts"
 
 [lib]
 path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"

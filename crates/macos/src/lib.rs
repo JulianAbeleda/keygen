@@ -1,5 +1,116 @@
 //! Safe API over the small AppKit boundary required by KeyGen's native host.
 
+/// Composition events contain only bounded, owned UTF-8; no Cocoa object escapes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextInputEvent {
+    Preedit(String),
+    Commit(String),
+    Cancel,
+}
+
+/// Main-thread-only owner of the native input client. AppKit validates the
+/// window identity on attachment; the retained view uses a weak window link,
+/// so closing the window before this guard is dropped remains safe.
+pub struct TextInput {
+    #[cfg(target_os = "macos")]
+    handle: std::ptr::NonNull<core::ffi::c_void>,
+    enabled: bool,
+    _main_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl TextInput {
+    pub fn attach(window_identity: usize) -> Result<Self, String> {
+        #[cfg(target_os = "macos")]
+        {
+            // Only this module calls the compiled AppKit adapter. Its lifetime
+            // is owned here, and !Send/!Sync keeps all subsequent calls local.
+            let handle = std::ptr::NonNull::new(unsafe { kg_text_input_attach(window_identity) })
+                .ok_or("cannot attach native text input to this main-thread window")?;
+            Ok(Self {
+                handle,
+                enabled: false,
+                _main_thread: std::marker::PhantomData,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window_identity;
+            Err("native composition adapter is unavailable on this platform".into())
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Coordinates are content-local logical points, with a top-left origin.
+    pub fn set_caret(&mut self, caret: Option<[f64; 4]>) {
+        let caret = caret.filter(|r| r.iter().all(|v| v.is_finite()) && r[2] > 0.0 && r[3] > 0.0);
+        self.enabled = caret.is_some();
+        #[cfg(target_os = "macos")]
+        {
+            let [x, y, width, height] = caret.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+            unsafe { kg_text_input_set(self.handle.as_ptr(), self.enabled, x, y, width, height) };
+        }
+    }
+
+    pub fn poll(&mut self) -> Option<TextInputEvent> {
+        #[cfg(target_os = "macos")]
+        {
+            let mut bytes = [0u8; 4096];
+            let mut length = 0usize;
+            let kind = unsafe {
+                kg_text_input_poll(
+                    self.handle.as_ptr(),
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &mut length,
+                )
+            };
+            let text = String::from_utf8(bytes.get(..length)?.to_vec()).ok()?;
+            match kind {
+                1 => Some(TextInputEvent::Preedit(text)),
+                2 => Some(TextInputEvent::Commit(text)),
+                3 => Some(TextInputEvent::Cancel),
+                _ => None,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+}
+
+impl Drop for TextInput {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            kg_text_input_detach(self.handle.as_ptr())
+        };
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn kg_text_input_attach(identity: usize) -> *mut core::ffi::c_void;
+    fn kg_text_input_set(
+        handle: *mut core::ffi::c_void,
+        enabled: bool,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    );
+    fn kg_text_input_poll(
+        handle: *mut core::ffi::c_void,
+        buffer: *mut u8,
+        capacity: usize,
+        length: *mut usize,
+    ) -> usize;
+    fn kg_text_input_detach(handle: *mut core::ffi::c_void);
+}
+
 const MAX_WINDOW_DIMENSION: usize = 4096;
 
 /// Measured native outer-frame geometry in global top-left logical points.

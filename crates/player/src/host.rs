@@ -1,5 +1,6 @@
 //! Generic native application host. Product crates provide only state and drawing.
 use keygen_engine::{Canvas, Surface};
+pub use keygen_macos::TextInputEvent;
 use minifb::{CursorStyle, InputCallback, Key, MouseButton, MouseMode, Window, WindowOptions};
 use std::{
     cell::RefCell,
@@ -105,6 +106,18 @@ pub enum WindowRequest {
 pub trait Application {
     fn frame(&mut self, canvas: &mut Canvas, context: HostContext);
     fn event(&mut self, _event: HostEvent) {}
+    /// Enable native composition only for an editable surface. The rectangle
+    /// anchors the system candidate panel; product rendering remains owned here.
+    fn text_input_caret(&self) -> Option<[f64; 4]> {
+        None
+    }
+    fn composition(&mut self, event: TextInputEvent) {
+        if let TextInputEvent::Commit(text) = event {
+            for character in text.chars() {
+                self.event(HostEvent::Text(character));
+            }
+        }
+    }
     /// Return false when the previously presented buffer remains valid. The
     /// host will continue polling native events without rerasterizing it.
     fn needs_redraw(&self) -> bool {
@@ -201,6 +214,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let pending_input = Rc::new(RefCell::new(PendingInput::default()));
     let mut active_policy = policy;
     let mut window = create_window(&active_policy, pending_input.clone())?;
+    let mut text_input: Option<keygen_macos::TextInput> = None;
     let started = Instant::now();
     let mut previous = started;
     let mut frame = 0;
@@ -237,13 +251,21 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
         // macOS may deliver committed text and Return during the same host
         // frame. Apply the text callback first so Return submits the complete
         // Composer value instead of observing the previous frame's text.
-        let (committed_text, native_keys) = {
+        let (mut committed_text, native_keys) = {
             let mut pending = pending_input.borrow_mut();
             (
                 pending.text.drain(..).collect::<Vec<_>>(),
                 pending.keys.drain(..).collect::<Vec<_>>(),
             )
         };
+        if let Some(input) = &mut text_input {
+            if input.enabled() {
+                committed_text.clear();
+            }
+            while let Some(event) = input.poll() {
+                app.composition(event);
+            }
+        }
         let key_events = native_keys
             .into_iter()
             .map(|(key, pressed)| (key, pressed, modifiers(&window)))
@@ -306,6 +328,15 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
             // presentation queue remain alive across the request. The next
             // submitted frame reports the platform's measured geometry.
             continue;
+        }
+        #[cfg(target_os = "macos")]
+        if text_input.is_none() && app.text_input_caret().is_some() {
+            text_input = Some(keygen_macos::TextInput::attach(
+                window.get_window_handle() as usize
+            )?);
+        }
+        if let Some(input) = &mut text_input {
+            input.set_caret(app.text_input_caret());
         }
         if frame == 0 || window_observation_pending || app.needs_redraw() {
             let mut canvas = Canvas::new_scaled(
@@ -558,6 +589,23 @@ mod tests {
         fn event(&mut self, event: HostEvent) {
             self.0.push(event);
         }
+    }
+
+    #[test]
+    fn composition_delivers_only_committed_unicode_text() {
+        let mut recorder = EventRecorder::default();
+        assert_eq!(recorder.text_input_caret(), None);
+        recorder.composition(keygen_macos::TextInputEvent::Preedit("nihao".into()));
+        recorder.composition(keygen_macos::TextInputEvent::Cancel);
+        assert!(recorder.0.is_empty());
+        recorder.composition(keygen_macos::TextInputEvent::Commit("你好日本語é🦀".into()));
+        assert_eq!(
+            recorder.0,
+            "你好日本語é🦀"
+                .chars()
+                .map(HostEvent::Text)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
