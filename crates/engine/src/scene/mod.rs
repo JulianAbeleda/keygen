@@ -676,6 +676,10 @@ where
                 line += 1;
                 let mut next_x = 0.0;
                 let mut moved = out.split_off(space + 1);
+                // A word moved down with this glyph: a space here is the gap
+                // after that word, so it stays. Dropped, "you think" read
+                // "youthink" (GameTerm, 2026-09-26).
+                let carried_word = !moved.is_empty();
                 for glyph in &mut moved {
                     glyph.line = line;
                     glyph.x = next_x;
@@ -686,7 +690,7 @@ where
                 line_start = out.len();
                 last_space = None;
                 x = next_x;
-                if ch.is_whitespace() {
+                if ch.is_whitespace() && !carried_word {
                     continue;
                 }
                 out.push(GlyphPlacement {
@@ -696,6 +700,9 @@ where
                     line,
                 });
                 x += measured;
+                if ch.is_whitespace() {
+                    last_space = Some(out.len() - 1);
+                }
                 continue;
             }
         }
@@ -952,6 +959,25 @@ mod tests {
                 .all(|pair| { pair[1].line > pair[0].line || pair[1].x >= pair[0].x }));
         }
     }
+    #[test]
+    fn a_space_that_overflows_the_line_stays_between_the_words() {
+        // The space after "you" is the glyph that overflows 6 columns, and
+        // "you" moves down with it. The space used to be dropped there, so
+        // the line read "youthi" (GameTerm, 2026-09-26).
+        let glyphs =
+            layout_text_measured("do you think", 6.0, 1.0, Align::Left, Wrap::Word, |_| 1.0);
+        let text: String = glyphs.iter().map(|g| g.character).collect();
+        assert_eq!(text, "do you think");
+        let line = |n| {
+            glyphs
+                .iter()
+                .filter(|g| g.line == n)
+                .map(|g| g.character)
+                .collect::<String>()
+        };
+        assert_eq!([line(0), line(1), line(2)], ["do ", "you ", "think"]);
+    }
+
     #[test]
     fn clock_is_fixed_and_focus_is_semantic() {
         let a = AnimationSpec {
