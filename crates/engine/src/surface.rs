@@ -754,7 +754,7 @@ impl Canvas {
         }
     }
 
-    /// Draws a rounded rectangle with fixed four-by-four coverage samples.
+    /// Draws an antialiased rounded rectangle (analytic edge coverage).
     /// Coordinates are logical pixels and the radius is clamped to the
     /// rectangle. This is intentionally bounded and does not allocate.
     pub fn rounded_rect_aa(&mut self, [x, y, w, h]: [f32; 4], radius: f32, color: [u8; 4]) {
@@ -840,6 +840,17 @@ impl Canvas {
         }
     }
 
+    // Analytic coverage, not supersampling: one signed distance per pixel
+    // centre and coverage = clamp(0.5 - d) (SDF antialiasing, as in
+    // pkh.me; Skia and tiny-skia likewise never visit the interior). The
+    // shape is convex, so on each row the fully covered pixels form one
+    // span: scan inward from both ends until coverage is full, then fill that
+    // span (a fill) or skip its hollow middle (an outline, whose coverage is
+    // outer minus inner). Cost follows the edge length, not the box area.
+    // The old 4x4 supersample ran 16-32 distance calls on every pixel of the
+    // box, which made a large outline cost ~20 ms a frame. Tradeoff: edge
+    // pixels take continuous coverage instead of 1/16 steps, and fill edges
+    // on fractional coordinates are now antialiased like the corners.
     fn rounded_shape(
         &mut self,
         [x, y, w, h]: [f32; 4],
@@ -863,48 +874,79 @@ impl Canvas {
         let h = h * s;
         let r = radius.max(0.0).min(w.min(h) / 2.0);
         let half = (inner_inset * s).max(0.0);
+        let inner = [
+            x + half,
+            y + half,
+            (w - 2.0 * half).max(0.0),
+            (h - 2.0 * half).max(0.0),
+            (r - half).max(0.0),
+        ];
         let min_x = x.floor().max(0.0) as i32;
         let min_y = y.floor().max(0.0) as i32;
         let max_x = (x + w).ceil().min(self.surface.width as f32) as i32;
         let max_y = (y + h).ceil().min(self.surface.height as f32) as i32;
+        let outer_at = |px: i32, cy: f32| {
+            (0.5 - rounded_distance(px as f32 + 0.5, cy, x, y, w, h, r)).clamp(0.0, 1.0)
+        };
+        let inner_at = |px: i32, cy: f32| {
+            if !stroke {
+                return 0.0;
+            }
+            let [ix, iy, iw, ih, ir] = inner;
+            (0.5 - rounded_distance(px as f32 + 0.5, cy, ix, iy, iw, ih, ir)).clamp(0.0, 1.0)
+        };
         for py in min_y..max_y {
-            for px in min_x..max_x {
-                let center_x = px as f32 + 0.5;
-                let center_y = py as f32 + 0.5;
-                let outer_band = (center_x >= x + r && center_x < x + w - r)
-                    || (center_y >= y + r && center_y < y + h - r);
-                if !stroke && outer_band {
-                    self.surface.blend(px, py, color, 1.0);
-                    continue;
+            let cy = py as f32 + 0.5;
+            // Partly covered pixels from each end, up to the full span.
+            let mut left = min_x;
+            while left < max_x {
+                let outer = outer_at(left, cy);
+                if outer >= 1.0 {
+                    break;
                 }
-                let outer_center = rounded_distance(center_x, center_y, x, y, w, h, r) <= -0.75;
-                if !stroke && outer_center {
-                    self.surface.blend(px, py, color, 1.0);
-                    continue;
-                }
-                let mut coverage = 0.0;
-                for sy in 0..4 {
-                    for sx in 0..4 {
-                        let qx = px as f32 + (sx as f32 + 0.5) / 4.0;
-                        let qy = py as f32 + (sy as f32 + 0.5) / 4.0;
-                        let outer = rounded_distance(qx, qy, x, y, w, h, r) <= 0.0;
-                        let inner = rounded_distance(
-                            qx,
-                            qy,
-                            x + half,
-                            y + half,
-                            (w - 2.0 * half).max(0.0),
-                            (h - 2.0 * half).max(0.0),
-                            (r - half).max(0.0),
-                        ) <= 0.0;
-                        if outer && (!stroke || !inner) {
-                            coverage += 1.0 / 16.0;
-                        }
-                    }
-                }
+                let coverage = outer - inner_at(left, cy);
                 if coverage > 0.0 {
-                    self.surface.blend(px, py, color, coverage);
+                    self.surface.blend(left, py, color, coverage);
                 }
+                left += 1;
+            }
+            let mut right = max_x;
+            while right > left {
+                let outer = outer_at(right - 1, cy);
+                if outer >= 1.0 {
+                    break;
+                }
+                let coverage = outer - inner_at(right - 1, cy);
+                if coverage > 0.0 {
+                    self.surface.blend(right - 1, py, color, coverage);
+                }
+                right -= 1;
+            }
+            if !stroke {
+                for px in left..right {
+                    self.surface.blend(px, py, color, 1.0);
+                }
+                continue;
+            }
+            // Inside the full span an outline is 1 - inner coverage, up to
+            // the hollow middle, which is never visited.
+            let mut a = left;
+            while a < right {
+                let hole = inner_at(a, cy);
+                if hole >= 1.0 {
+                    break;
+                }
+                self.surface.blend(a, py, color, 1.0 - hole);
+                a += 1;
+            }
+            let mut b = right;
+            while b > a {
+                let hole = inner_at(b - 1, cy);
+                if hole >= 1.0 {
+                    break;
+                }
+                self.surface.blend(b - 1, py, color, 1.0 - hole);
+                b -= 1;
             }
         }
     }
@@ -2116,5 +2158,181 @@ mod tests {
         assert_eq!(exact.surface().pixels, blit.surface().pixels);
         assert!(canvas.blend_surface(&source, 0, 0, 0.0));
         assert!(!canvas.blend_surface(&Surface::new(1, 1, [1, 2, 3, 128]), 0, 0, 0.5));
+    }
+
+    /// The 4x4 supersampled `rounded_shape` this module used before the
+    /// analytic version; kept here only as the comparison reference.
+    fn supersampled_rounded_shape(
+        canvas: &mut Canvas,
+        [x, y, w, h]: [f32; 4],
+        radius: f32,
+        color: [u8; 4],
+        stroke: bool,
+        inner_inset: f32,
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let s = canvas.density;
+        let (x, y, w, h) = (x * s, y * s, w * s, h * s);
+        let r = radius.max(0.0).min(w.min(h) / 2.0);
+        let half = (inner_inset * s).max(0.0);
+        let min_x = x.floor().max(0.0) as i32;
+        let min_y = y.floor().max(0.0) as i32;
+        let max_x = (x + w).ceil().min(canvas.surface.width as f32) as i32;
+        let max_y = (y + h).ceil().min(canvas.surface.height as f32) as i32;
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let center_x = px as f32 + 0.5;
+                let center_y = py as f32 + 0.5;
+                let outer_band = (center_x >= x + r && center_x < x + w - r)
+                    || (center_y >= y + r && center_y < y + h - r);
+                if !stroke && outer_band {
+                    canvas.surface.blend(px, py, color, 1.0);
+                    continue;
+                }
+                let outer_center = rounded_distance(center_x, center_y, x, y, w, h, r) <= -0.75;
+                if !stroke && outer_center {
+                    canvas.surface.blend(px, py, color, 1.0);
+                    continue;
+                }
+                let mut coverage = 0.0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let qx = px as f32 + (sx as f32 + 0.5) / 4.0;
+                        let qy = py as f32 + (sy as f32 + 0.5) / 4.0;
+                        let outer = rounded_distance(qx, qy, x, y, w, h, r) <= 0.0;
+                        let inner = rounded_distance(
+                            qx,
+                            qy,
+                            x + half,
+                            y + half,
+                            (w - 2.0 * half).max(0.0),
+                            (h - 2.0 * half).max(0.0),
+                            (r - half).max(0.0),
+                        ) <= 0.0;
+                        if outer && (!stroke || !inner) {
+                            coverage += 1.0 / 16.0;
+                        }
+                    }
+                }
+                if coverage > 0.0 {
+                    canvas.surface.blend(px, py, color, coverage);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn analytic_rounded_shape_differs_from_supersampling_only_on_edges() {
+        let background = [12, 24, 36, 255];
+        let mut cases = 0;
+        let mut differing = 0;
+        let mut fill_max = 0u8;
+        let mut stroke_max = 0u8;
+        for density in [1.0f32, 2.0] {
+            for rect in [
+                [3.0f32, 2.0, 40.0, 24.0],
+                [2.3, 1.7, 37.6, 21.4],
+                [5.5, 3.25, 9.8, 7.3],
+                [1.0, 1.0, 60.0, 12.0],
+            ] {
+                for radius in [0.0f32, 4.0, 12.0, 24.0] {
+                    for width in [0.0f32, 1.0, 2.0, 3.0] {
+                        for color in [[230, 120, 40, 255], [90, 200, 160, 140]] {
+                            cases += 1;
+                            let mut new = Canvas::new_scaled(70, 32, density, background);
+                            let mut old = Canvas::new_scaled(70, 32, density, background);
+                            let stroke = width > 0.0;
+                            if stroke {
+                                new.rounded_stroke_inside(rect, radius, width, color);
+                            } else {
+                                new.rounded_rect_aa(rect, radius, color);
+                            }
+                            supersampled_rounded_shape(
+                                &mut old, rect, radius, color, stroke, width,
+                            );
+                            let s = density;
+                            let (x, y, w, h) = (rect[0] * s, rect[1] * s, rect[2] * s, rect[3] * s);
+                            let r = radius.max(0.0).min(w.min(h) / 2.0);
+                            let half = width * s;
+                            let pixels = new.surface.width as usize;
+                            for (i, (a, b)) in new
+                                .surface
+                                .pixels
+                                .chunks_exact(4)
+                                .zip(old.surface.pixels.chunks_exact(4))
+                                .enumerate()
+                            {
+                                let delta =
+                                    a.iter().zip(b).map(|(p, q)| p.abs_diff(*q)).max().unwrap();
+                                if delta == 0 {
+                                    continue;
+                                }
+                                differing += 1;
+                                let cx = (i % pixels) as f32 + 0.5;
+                                let cy = (i / pixels) as f32 + 0.5;
+                                let outer = rounded_distance(cx, cy, x, y, w, h, r);
+                                let inner = rounded_distance(
+                                    cx,
+                                    cy,
+                                    x + half,
+                                    y + half,
+                                    (w - 2.0 * half).max(0.0),
+                                    (h - 2.0 * half).max(0.0),
+                                    (r - half).max(0.0),
+                                );
+                                let edge = outer.abs() < 1.0 || (stroke && inner.abs() < 1.0);
+                                assert!(
+                                    edge,
+                                    "non-edge difference {delta} at {cx},{cy}: rect {rect:?} r {radius} width {width} density {density} outer {outer} inner {inner}"
+                                );
+                                if stroke {
+                                    stroke_max = stroke_max.max(delta);
+                                } else {
+                                    fill_max = fill_max.max(delta);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "analytic vs supersampled: {cases} cases, {differing} differing pixels, all on edges; max channel delta fill {fill_max}, outline {stroke_max}"
+        );
+    }
+
+    #[test]
+    #[ignore = "timing; run with --release --ignored --nocapture"]
+    fn analytic_rounded_shape_timing_at_tutorial_overlay_sizes() {
+        let color = [120, 200, 255, 255];
+        for (name, rect, width) in [
+            (
+                "card outline 600x220",
+                [40.0f32, 40.0, 600.0, 220.0],
+                3.0f32,
+            ),
+            ("card fill 600x220", [40.0, 40.0, 600.0, 220.0], 0.0),
+            ("target outline 1200x160", [20.0, 300.0, 1200.0, 160.0], 4.0),
+        ] {
+            let mut canvas = Canvas::new_scaled(1280, 500, 2.0, [0, 0, 0, 255]);
+            let runs = 20;
+            let started = std::time::Instant::now();
+            for _ in 0..runs {
+                if width > 0.0 {
+                    canvas.rounded_stroke_inside(rect, 12.0, width, color);
+                } else {
+                    canvas.rounded_rect_aa(rect, 12.0, color);
+                }
+            }
+            let new = started.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+            let started = std::time::Instant::now();
+            for _ in 0..runs {
+                supersampled_rounded_shape(&mut canvas, rect, 12.0, color, width > 0.0, width);
+            }
+            let old = started.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+            println!("{name} at density 2: supersampled {old:.3} ms, analytic {new:.3} ms");
+        }
     }
 }
