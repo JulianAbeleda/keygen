@@ -1,6 +1,6 @@
 //! Generic native application host. Product crates provide only state and drawing.
 use keygen_engine::{Canvas, Surface};
-pub use keygen_macos::TextInputEvent;
+pub use keygen_macos::{double_click_interval, TextAccessibility, TextInputEvent};
 use minifb::{CursorStyle, InputCallback, Key, MouseButton, MouseMode, Window, WindowOptions};
 use std::{
     cell::RefCell,
@@ -22,6 +22,9 @@ pub enum HostEvent {
         y: f32,
         button: Option<MouseButton>,
         pressed: bool,
+        /// The keys held with this pointer event (Shift+click extends a
+        /// selection).
+        modifiers: Modifiers,
     },
     Scroll {
         /// Native vertical scroll delta. Fractional values are preserved so
@@ -109,6 +112,11 @@ pub trait Application {
     /// Enable native composition only for an editable surface. The rectangle
     /// anchors the system candidate panel; product rendering remains owned here.
     fn text_input_caret(&self) -> Option<[f64; 4]> {
+        None
+    }
+    /// What VoiceOver reads for the edited text (value, selection, frame);
+    /// `None` exposes no text element.
+    fn text_accessibility(&self) -> Option<TextAccessibility> {
         None
     }
     fn composition(&mut self, event: TextInputEvent) {
@@ -287,6 +295,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                     y,
                     button: None,
                     pressed: down,
+                    modifiers: modifiers(&window),
                 });
                 previous_pointer = Some(pointer);
             }
@@ -296,6 +305,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                     y,
                     button: Some(MouseButton::Left),
                     pressed: down,
+                    modifiers: modifiers(&window),
                 });
                 previous_left_down = down;
             }
@@ -344,6 +354,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
         }
         if let Some(input) = &mut text_input {
             input.set_caret(app.text_input_caret());
+            input.set_accessibility(app.text_accessibility());
         }
         if frame == 0 || window_observation_pending || app.needs_redraw() {
             let mut canvas = Canvas::new_scaled(

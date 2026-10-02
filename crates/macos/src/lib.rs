@@ -11,10 +11,51 @@ pub enum TextInputEvent {
 /// Main-thread-only owner of the native input client. AppKit validates the
 /// window identity on attachment; the retained view uses a weak window link,
 /// so closing the window before this guard is dropped remains safe.
+/// What an assistive reader (VoiceOver) is told about the edited text: the
+/// app draws the text itself, so the input view stands in for it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextAccessibility {
+    pub label: String,
+    pub value: String,
+    /// The selection as (anchor, caret) in characters (Unicode scalars) of
+    /// `value`; equal is a bare caret.
+    pub selection: (u32, u32),
+    /// The edited area: content-local logical points, top-left origin.
+    pub frame: [f64; 4],
+}
+
+impl TextAccessibility {
+    /// The selection in UTF-16 code units (start, length), as AppKit counts.
+    pub fn utf16_range(&self) -> (usize, usize) {
+        let (a, b) = (
+            self.selection.0.min(self.selection.1),
+            self.selection.0.max(self.selection.1),
+        );
+        let units = |chars: u32| -> usize {
+            self.value
+                .chars()
+                .take(chars as usize)
+                .map(char::len_utf16)
+                .sum()
+        };
+        (units(a), units(b) - units(a))
+    }
+
+    /// The caret's line, counting line breaks before it (zero-based).
+    pub fn caret_line(&self) -> usize {
+        self.value
+            .chars()
+            .take(self.selection.1 as usize)
+            .filter(|c| *c == '\n')
+            .count()
+    }
+}
+
 pub struct TextInput {
     #[cfg(target_os = "macos")]
     handle: std::ptr::NonNull<core::ffi::c_void>,
     enabled: bool,
+    accessibility: Option<TextAccessibility>,
     _main_thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
@@ -29,6 +70,7 @@ impl TextInput {
             Ok(Self {
                 handle,
                 enabled: false,
+                accessibility: None,
                 _main_thread: std::marker::PhantomData,
             })
         }
@@ -52,6 +94,38 @@ impl TextInput {
             let [x, y, width, height] = caret.unwrap_or([0.0, 0.0, 1.0, 1.0]);
             unsafe { kg_text_input_set(self.handle.as_ptr(), self.enabled, x, y, width, height) };
         }
+    }
+
+    /// Tells VoiceOver what the edited text is; `None` hides the element.
+    /// Crosses into AppKit only when something changed.
+    pub fn set_accessibility(&mut self, accessibility: Option<TextAccessibility>) {
+        if accessibility == self.accessibility {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let shown = accessibility.clone().unwrap_or_default();
+            let (start, length) = shown.utf16_range();
+            let [x, y, width, height] = shown.frame;
+            unsafe {
+                kg_text_input_accessibility(
+                    self.handle.as_ptr(),
+                    accessibility.is_some(),
+                    shown.label.as_ptr(),
+                    shown.label.len(),
+                    shown.value.as_ptr(),
+                    shown.value.len(),
+                    start,
+                    length,
+                    shown.caret_line(),
+                    x,
+                    y,
+                    width,
+                    height,
+                )
+            };
+        }
+        self.accessibility = accessibility;
     }
 
     pub fn poll(&mut self) -> Option<TextInputEvent> {
@@ -109,6 +183,22 @@ unsafe extern "C" {
         length: *mut usize,
     ) -> usize;
     fn kg_text_input_detach(handle: *mut core::ffi::c_void);
+    #[allow(clippy::too_many_arguments)]
+    fn kg_text_input_accessibility(
+        handle: *mut core::ffi::c_void,
+        present: bool,
+        label: *const u8,
+        label_len: usize,
+        value: *const u8,
+        value_len: usize,
+        start: usize,
+        length: usize,
+        line: usize,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    );
 }
 
 /// A pointer shape the host can reassert directly through AppKit.
@@ -132,9 +222,24 @@ pub fn set_cursor(cursor: NativeCursor) {
     let _ = cursor;
 }
 
+/// The longest gap between two clicks that still makes a double-click: the
+/// person's macOS setting, else 0.5 s (AppKit's default) off macOS or when
+/// the value is unusable.
+pub fn double_click_interval() -> std::time::Duration {
+    #[cfg(target_os = "macos")]
+    {
+        let seconds = unsafe { kg_double_click_interval() };
+        if seconds.is_finite() && (0.05..=5.0).contains(&seconds) {
+            return std::time::Duration::from_secs_f64(seconds);
+        }
+    }
+    std::time::Duration::from_millis(500)
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn kg_cursor_set(shape: i32);
+    fn kg_double_click_interval() -> f64;
 }
 
 const MAX_WINDOW_DIMENSION: usize = 4096;
@@ -393,6 +498,35 @@ pub fn observe_window_frame() -> Result<WindowFrame, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn accessibility_ranges_are_utf16_and_lines_count_breaks() {
+        let text = super::TextAccessibility {
+            value: "a\u{1F600}b\nc".into(),
+            selection: (3, 1),
+            ..Default::default()
+        };
+        // The emoji is two UTF-16 units: chars 1..3 are units 1..4.
+        assert_eq!(text.utf16_range(), (1, 3));
+        let caret = super::TextAccessibility {
+            selection: (5, 5),
+            ..text
+        };
+        assert_eq!((caret.utf16_range(), caret.caret_line()), ((6, 0), 1));
+    }
+
+    #[test]
+    fn double_click_interval_is_a_usable_time() {
+        // The macOS setting when there is one, else AppKit's 0.5 s default.
+        let interval = super::double_click_interval();
+        assert!(
+            interval >= std::time::Duration::from_millis(50)
+                && interval <= std::time::Duration::from_secs(5),
+            "{interval:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(interval, std::time::Duration::from_millis(500));
+    }
+
     use super::*;
 
     #[test]
