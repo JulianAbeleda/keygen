@@ -220,7 +220,7 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     let mut frame = 0;
     let mut previous_pointer = None;
     let mut previous_left_down = false;
-    let mut previous_cursor = PointerCursor::Default;
+    let mut cursor_sync = CursorSync::default();
     let mut window_observation_pending = false;
     // minifb's macOS Metal backend consumes the submitted pixel pointer on an
     // asynchronous display callback. Keep several complete submissions alive
@@ -276,10 +276,12 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                 app.event(HostEvent::Scroll { delta });
             }
         }
+        let mut pointer_moved = false;
         if let Some((x, y)) = window.get_mouse_pos(MouseMode::Clamp) {
             let down = window.get_mouse_down(MouseButton::Left);
             let pointer = (x, y);
             if previous_pointer != Some(pointer) {
+                pointer_moved = true;
                 app.event(HostEvent::Pointer {
                     x,
                     y,
@@ -298,10 +300,15 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
                 previous_left_down = down;
             }
         }
-        let cursor = app.pointer_cursor();
-        if cursor != previous_cursor {
-            window.set_cursor_style(native_cursor(cursor));
-            previous_cursor = cursor;
+        let inside = window.get_mouse_pos(MouseMode::Discard).is_some();
+        let active = window.is_active();
+        match cursor_sync.frame(app.pointer_cursor(), active, inside, pointer_moved) {
+            Some(CursorSet::Changed(cursor)) => window.set_cursor_style(native_cursor(cursor)),
+            Some(CursorSet::Reassert(cursor)) => keygen_macos::set_cursor(match cursor {
+                PointerCursor::Default => keygen_macos::NativeCursor::Arrow,
+                PointerCursor::Text => keygen_macos::NativeCursor::IBeam,
+            }),
+            None => {}
         }
         if let Some(request) = app.take_window_request() {
             match request {
@@ -377,6 +384,46 @@ pub fn run<A: Application>(mut app: A, policy: WindowPolicy) -> Result<(), Strin
     }
     app.event(HostEvent::Close);
     Ok(())
+}
+
+/// What the host does with the pointer shape this frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CursorSet {
+    /// The app asked for a different shape.
+    Changed(PointerCursor),
+    /// The same shape again. minifb skips a style it already set, and AppKit
+    /// resets the cursor to the arrow on activation and at window edges, so
+    /// without this an I-beam the app still wants is lost until the pointer
+    /// leaves the text and comes back (CM-010).
+    Reassert(PointerCursor),
+}
+
+/// Decides when to set the pointer shape: on a change, and again when the
+/// window has just become active or the pointer moved inside the content.
+/// Never while the window is inactive or the pointer is outside it, so
+/// another application's cursor is left alone.
+#[derive(Clone, Copy, Debug, Default)]
+struct CursorSync {
+    previous: PointerCursor,
+    was_active: bool,
+}
+
+impl CursorSync {
+    fn frame(
+        &mut self,
+        cursor: PointerCursor,
+        active: bool,
+        inside: bool,
+        moved: bool,
+    ) -> Option<CursorSet> {
+        let became_active = active && !self.was_active;
+        self.was_active = active;
+        if cursor != self.previous {
+            self.previous = cursor;
+            return Some(CursorSet::Changed(cursor));
+        }
+        (active && inside && (became_active || moved)).then_some(CursorSet::Reassert(cursor))
+    }
 }
 
 fn native_cursor(cursor: PointerCursor) -> CursorStyle {
@@ -661,6 +708,48 @@ mod tests {
         assert_eq!(SolidApp.pointer_cursor(), PointerCursor::Default);
         assert_eq!(native_cursor(PointerCursor::Default), CursorStyle::Arrow);
         assert_eq!(native_cursor(PointerCursor::Text), CursorStyle::Ibeam);
+    }
+
+    #[test]
+    fn a_kept_text_cursor_is_reasserted_after_activation_and_on_moves_inside() {
+        use super::{CursorSet, CursorSync, PointerCursor::*};
+        let mut sync = CursorSync::default();
+        // The first front frame is an activation: the arrow is asserted once.
+        assert_eq!(
+            sync.frame(Default, true, true, false),
+            Some(CursorSet::Reassert(Default))
+        );
+        // Front, pointer resting outside text: nothing more to do.
+        assert_eq!(sync.frame(Default, true, true, false), None);
+        // Into the text: a change, set through minifb.
+        assert_eq!(
+            sync.frame(Text, true, true, true),
+            Some(CursorSet::Changed(Text))
+        );
+        // Resting there: no repeated calls every frame.
+        assert_eq!(sync.frame(Text, true, true, false), None);
+        // Another app takes focus: the shape is left alone.
+        assert_eq!(sync.frame(Text, false, true, true), None);
+        assert_eq!(sync.frame(Text, false, true, false), None);
+        // Back in front with the pointer unmoved: AppKit showed the arrow,
+        // so the I-beam is set again although the app's shape never changed.
+        assert_eq!(
+            sync.frame(Text, true, true, false),
+            Some(CursorSet::Reassert(Text))
+        );
+        assert_eq!(sync.frame(Text, true, true, false), None);
+        // A move inside the window reasserts (window edges reset it too).
+        assert_eq!(
+            sync.frame(Text, true, true, true),
+            Some(CursorSet::Reassert(Text))
+        );
+        // A move with the pointer outside the content never sets a cursor.
+        assert_eq!(sync.frame(Text, true, false, true), None);
+        // Leaving the text is still an ordinary change.
+        assert_eq!(
+            sync.frame(Default, true, true, true),
+            Some(CursorSet::Changed(Default))
+        );
     }
 
     #[test]

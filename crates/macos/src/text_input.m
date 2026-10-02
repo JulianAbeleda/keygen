@@ -153,3 +153,11 @@ void kg_text_input_detach(void *handle) {
     if (view.owner.firstResponder == view) [view.owner makeFirstResponder:view.previous];
     [view removeFromSuperview];
 }
+
+// The pointer shape, set unconditionally. minifb sets a cursor only when its
+// style changes, and AppKit resets the cursor to the arrow on activation and
+// at window edges, so a shape the app still wants is never shown again until
+// the app changes its mind. The host calls this to reassert the current shape.
+void kg_cursor_set(int32_t shape) {
+    [(shape == 1 ? [NSCursor IBeamCursor] : [NSCursor arrowCursor]) set];
+}

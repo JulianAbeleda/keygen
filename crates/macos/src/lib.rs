@@ -111,6 +111,32 @@ unsafe extern "C" {
     fn kg_text_input_detach(handle: *mut core::ffi::c_void);
 }
 
+/// A pointer shape the host can reassert directly through AppKit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeCursor {
+    Arrow,
+    IBeam,
+}
+
+/// Sets the pointer shape now, even when it is already the requested one.
+/// Main thread only, like every AppKit call here; a no-op off macOS.
+pub fn set_cursor(cursor: NativeCursor) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        kg_cursor_set(match cursor {
+            NativeCursor::Arrow => 0,
+            NativeCursor::IBeam => 1,
+        })
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = cursor;
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn kg_cursor_set(shape: i32);
+}
+
 const MAX_WINDOW_DIMENSION: usize = 4096;
 
 /// Measured native outer-frame geometry in global top-left logical points.
